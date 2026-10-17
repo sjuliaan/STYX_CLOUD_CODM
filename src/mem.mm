@@ -10,7 +10,7 @@
 
 // The iOS SDK ships a stub `mach/mach_vm.h` that #errors. The mach_vm_* entry
 // points are still exported by libsystem_kernel, so declare what we need.
-extern kern_return_t mach_vm_remap(
+extern "C" kern_return_t mach_vm_remap(
     vm_map_t            target_task,
     mach_vm_address_t  *target_address,
     mach_vm_size_t      size,
@@ -23,7 +23,7 @@ extern kern_return_t mach_vm_remap(
     vm_prot_t          *max_protection,
     vm_inherit_t        inheritance);
 
-extern kern_return_t vm_copy(
+extern "C" kern_return_t vm_copy(
     vm_map_t    target_task,
     vm_address_t target_address,
     vm_size_t   size,
