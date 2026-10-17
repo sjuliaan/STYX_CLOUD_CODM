@@ -1,11 +1,33 @@
 #include "mem.h"
 
-#import <mach/mach.h>
-#import <mach/mach_vm.h>
-#import <mach/vm_region.h>
-#import <sys/mman.h>
-#import <string.h>
-#import <libkern/OSCacheControl.h>
+#include <mach/mach.h>
+#include <mach/vm_types.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <libkern/OSCacheControl.h>
+
+// The iOS SDK ships a stub `mach/mach_vm.h` that #errors. The mach_vm_* entry
+// points are still exported by libsystem_kernel, so declare what we need.
+extern kern_return_t mach_vm_remap(
+    vm_map_t            target_task,
+    mach_vm_address_t  *target_address,
+    mach_vm_size_t      size,
+    mach_vm_offset_t    mask,
+    int                 flags,
+    vm_map_t            src_task,
+    mach_vm_address_t   src_address,
+    boolean_t           copy,
+    vm_prot_t          *cur_protection,
+    vm_prot_t          *max_protection,
+    vm_inherit_t        inheritance);
+
+extern kern_return_t vm_copy(
+    vm_map_t    target_task,
+    vm_address_t target_address,
+    vm_size_t   size,
+    vm_address_t source_address);
 
 #ifndef VM_FLAGS_FIXED
 #define VM_FLAGS_FIXED 0x00000000
@@ -42,9 +64,9 @@ bool styx_mem_set(void *address, uint8_t value, size_t len) {
     return ok;
 }
 
-// Core technique: the target page is executable/read-only and vm_protect(RW) is
-// denied without JIT. Instead we copy the page into a fresh anonymous RW mapping,
-// apply the patch there, mark it RX, then remap it back over the original address.
+// The target page is executable/read-only and vm_protect(RW) is denied without
+// JIT. Copy the page into a fresh anonymous RW mapping, apply the patch there,
+// mark it RX, then remap it back over the original address.
 bool styx_mem_write(void *address, const void *buffer, size_t len) {
     if (!address || !buffer || len == 0) return false;
 
@@ -74,7 +96,7 @@ bool styx_mem_write(void *address, const void *buffer, size_t len) {
     mach_vm_address_t target = (mach_vm_address_t)pageStart;
     kern_return_t kr = mach_vm_remap(self, &target, (mach_vm_size_t)pageLen, 0,
                                      VM_FLAGS_OVERWRITE | VM_FLAGS_FIXED, self,
-                                     (mach_vm_offset_t)newMap, FALSE,
+                                     (mach_vm_address_t)newMap, FALSE,
                                      &cur, &max, VM_INHERIT_NONE);
     if (kr != KERN_SUCCESS) {
         munmap(newMap, pageLen);
@@ -91,8 +113,7 @@ bool styx_hook_branch(void *from, const void *to) {
     uintptr_t dst = (uintptr_t)to;
     int64_t delta = (int64_t)dst - (int64_t)src;
     if (delta < -(128LL << 20) || delta > (128LL << 20) - 4) {
-        // Out of +/-128MB branch range; a trampoline is required.
-        return false;
+        return false; // out of +/-128MB branch range; needs a trampoline
     }
     uint32_t insn = 0x14000000u | ((uint32_t)((delta >> 2) & 0x03FFFFFFu));
     return styx_mem_write(from, &insn, sizeof(insn));
