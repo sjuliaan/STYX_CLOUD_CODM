@@ -4,6 +4,7 @@
 #include "base.h"
 #include "mem.h"
 #include "offsets.h"
+#include "stealth.h"
 #include "styxlog.h"
 
 // A self-contained function used to validate the no-JIT patch layer without
@@ -49,5 +50,8 @@ static void styx_init(void) {
 
         styx_log("loader ready (feature build pending)");
         styx_log("================================================");
+
+        // Install the log-only anti-cheat detection probe.
+        styx_stealth_start();
     }
 }
