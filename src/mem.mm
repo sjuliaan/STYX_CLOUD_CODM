@@ -1,5 +1,4 @@
 #include "mem.h"
-#include "base.h"
 #include "styxlog.h"
 
 #include <mach/mach.h>
@@ -10,26 +9,20 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <mach-o/dyld.h>
-#include <mach-o/loader.h>
 
 // ---------------------------------------------------------------------------
 // No-JIT memory patching (jailed iOS).
 //
 // We do NOT inline-patch the game's executable __TEXT pages. Confirmed on
-// iOS 17.6.1: writing a signed code page (even via vm_protect(VM_PROT_COPY),
-// which works for the write) leaves the page non-executable, and the next
-// instruction fetch on it is a CODESIGNING "Invalid Page" SIGKILL.
+// iOS 17.6.1 (probe): once a code page is made writable via
+// vm_protect(VM_PROT_COPY) its max protection drops to RW, VM_PROT_EXECUTE can
+// never be restored (kr=2), and mprotect back to RX fails (-1). The next
+// instruction fetch on a dirtied page is a CODESIGNING "Invalid Page" SIGKILL.
 //
-// The working technique used by shipping jailbreak-free mods is DATA-only:
+// The only safe technique is DATA-only redirection:
 //   * rebind symbol/pointer slots in __DATA / __DATA_CONST (fishhook-style), and
 //   * redirect il2cpp method pointers in __DATA_CONST (see hook.mm),
-// both via a plain writable-region write or vm_protect(VM_PROT_COPY).
-//
-// mem_write therefore treats executable pages defensively: it verifies it can
-// restore EXECUTE *before* dirtying anything, and refuses otherwise.
+// both via a plain writable write or vm_protect(VM_PROT_COPY).
 // ---------------------------------------------------------------------------
 
 static inline size_t styx_page_size(void) { return (size_t)getpagesize(); }
@@ -50,8 +43,7 @@ static inline kern_return_t styx_protect(uintptr_t start, size_t len,
                       set_maximum ? TRUE : FALSE, (vm_prot_t)prot);
 }
 
-// Our own Mach-O header (libstyx.dylib). We must never patch the image we are
-// executing from — protecting its live code pages crashes the app.
+// Our own Mach-O header (libstyx.dylib). Never patch the image we run from.
 static void *styx_own_header(void) {
     Dl_info info;
     if (dladdr((void *)&styx_own_header, &info) != 0) return info.dli_fbase;
@@ -102,6 +94,24 @@ bool styx_mem_set(void *address, uint8_t value, size_t len) {
     return ok;
 }
 
+// Make [start, start+len) writable. `exec` pages are never forced (we must be
+// able to put EXECUTE back). For data pages, if COPY fails because the region's
+// max protection was lowered to R, raise the maximum first and retry.
+static bool styx_make_writable(uintptr_t start, size_t len, bool exec) {
+    kern_return_t kr = styx_protect(start, len,
+                                    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY, false);
+    if (kr == KERN_SUCCESS) return true;
+    if (exec) return false;
+
+    // Data page: try to raise the maximum protection, then request the copy.
+    if (styx_protect(start, len, VM_PROT_READ | VM_PROT_WRITE, true) == KERN_SUCCESS) {
+        kr = styx_protect(start, len,
+                          VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY, false);
+        if (kr == KERN_SUCCESS) return true;
+    }
+    return false;
+}
+
 bool styx_mem_write(void *address, const void *buffer, size_t len) {
     if (!address || !buffer || len == 0) return false;
 
@@ -118,36 +128,29 @@ bool styx_mem_write(void *address, const void *buffer, size_t len) {
         styx_log("[mem] region query FAIL @%p -- refusing write", address);
         return false;
     }
-    // Do not straddle a region boundary: pageLen must stay inside the region.
     if (pageStart < reg.start || pageStart + pageLen > reg.start + reg.size) {
-        styx_log("[mem] write straddles region @%p (page 0x%zx..0x%zx vs 0x%lx..0x%lx)",
-                 address, (size_t)pageStart, (size_t)(pageStart + pageLen),
-                 (unsigned long)reg.start, (unsigned long)(reg.start + reg.size));
+        styx_log("[mem] write straddles region @%p", address);
         return false;
     }
 
     const uint32_t orig = reg.prot;
     const bool exec = (orig & VM_PROT_EXECUTE) != 0;
 
-    // Fast path: already writable (data/heap/__DATA). Just write.
+    // Fast path: already writable data.
     if (orig & VM_PROT_WRITE) {
         memcpy(address, buffer, len);
         sys_icache_invalidate((void *)pageStart, pageLen);
-        styx_log("[mem] wrote %zu B @%p (writable, prot=0x%x)", len, address, orig);
         return true;
     }
 
-    // Make it writable through a private copy-on-write page.
-    kern_return_t kr = styx_protect(pageStart, pageLen,
-                                    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY, false);
-    if (kr != KERN_SUCCESS) {
-        styx_log("[mem] vm_protect(RW|COPY) FAIL kr=%d page=0x%lx", (int)kr,
-                 (unsigned long)pageStart);
+    if (!styx_make_writable(pageStart, pageLen, exec)) {
+        styx_log("[mem] make_writable FAIL @%p (prot=0x%x max=0x%x exec=%d)",
+                 address, orig, reg.maxprot, (int)exec);
         return false;
     }
 
     if (exec) {
-        // Verify we can put EXECUTE back BEFORE dirtying the page.
+        // Prove we can restore EXECUTE before dirtying the page.
         styx_protect(pageStart, pageLen, VM_PROT_READ | VM_PROT_WRITE, false);
         kern_return_t r2 = styx_protect(pageStart, pageLen, orig, true);
         styx_region now;
@@ -160,11 +163,8 @@ bool styx_mem_write(void *address, const void *buffer, size_t len) {
                      address, (int)r2, now.prot);
             return false;
         }
-        // Round-trip verified; re-acquire the writable copy for the real write.
-        kr = styx_protect(pageStart, pageLen,
-                          VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY, false);
-        if (kr != KERN_SUCCESS) {
-            styx_log("[mem] vm_protect(RW|COPY) re-acquire FAIL kr=%d", (int)kr);
+        if (!styx_make_writable(pageStart, pageLen, exec)) {
+            styx_log("[mem] make_writable (re-acquire) FAIL @%p", address);
             return false;
         }
     }
@@ -172,23 +172,18 @@ bool styx_mem_write(void *address, const void *buffer, size_t len) {
     memcpy(address, buffer, len);
     sys_icache_invalidate((void *)pageStart, pageLen);
 
-    kr = styx_protect(pageStart, pageLen, orig, false);
-    if (kr != KERN_SUCCESS) {
+    kern_return_t kr = styx_protect(pageStart, pageLen, orig, false);
+    if (kr != KERN_SUCCESS && exec) {
         kern_return_t kr2 = styx_protect(pageStart, pageLen, orig, true);
-        styx_log("[mem] restore prot 0x%x FAIL kr=%d (setmax retry kr=%d)", orig, (int)kr, (int)kr2);
-        if (exec && kr2 != KERN_SUCCESS)
+        if (kr2 != KERN_SUCCESS)
             styx_log("[mem] FATAL: exec page left non-exec @0x%lx", (unsigned long)pageStart);
     }
-
-    styx_log("[mem] patched %zu B @%p (page 0x%lx orig=0x%x max=0x%x exec=%d)",
-             len, address, (unsigned long)pageStart, orig, reg.maxprot, (int)exec);
     return true;
 }
 
 bool styx_hook_branch(void *from, const void *to) {
-    if (!from || !to) return false;
-    styx_log("[mem] styx_hook_branch DISABLED (inline __TEXT patch is AMFI-unsafe); "
-             "use styx_method_hook (data redirection) instead");
+    (void)from; (void)to;
+    styx_log("[mem] styx_hook_branch DISABLED (inline __TEXT patch is AMFI-unsafe)");
     return false;
 }
 
@@ -209,97 +204,4 @@ uintptr_t styx_mem_scan(uintptr_t start, size_t size,
         if (matched) return p;
     }
     return 0;
-}
-
-// ---------------------------------------------------------------------------
-// Capability probe (zero risk): private RX mapping of the running binary's page.
-// ---------------------------------------------------------------------------
-
-static bool styx_fileoff_for_rva(uintptr_t rva, uintptr_t *fileoff) {
-    const struct mach_header_64 *h = (const struct mach_header_64 *)_dyld_get_image_header(0);
-    if (!h || h->magic != MH_MAGIC_64) return false;
-    const uintptr_t va = 0x100000000ULL + rva; // preferrred base of the main image
-    uintptr_t p = (uintptr_t)h + sizeof(struct mach_header_64);
-    for (uint32_t i = 0; i < h->ncmds; i++) {
-        const struct load_command *lc = (const struct load_command *)p;
-        if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
-            const struct segment_command_64 *s = (const struct segment_command_64 *)lc;
-            if (va >= s->vmaddr && va < s->vmaddr + s->filesize) {
-                *fileoff = (uintptr_t)s->fileoff + (va - s->vmaddr);
-                return true;
-            }
-        }
-        p += lc->cmdsize;
-    }
-    return false;
-}
-
-static void styx_caps_report(const char *tag, uintptr_t addr) {
-    styx_region r;
-    if (styx_region_info(addr, &r))
-        styx_log("[caps] %s -> prot=0x%x max=0x%x rx=%d", tag, r.prot, r.maxprot,
-                 (r.prot & VM_PROT_EXECUTE) ? 1 : 0);
-    else
-        styx_log("[caps] %s -> region query failed", tag);
-}
-
-void styx_probe_patch_caps(uintptr_t rva) {
-    styx_log("[caps] ===== patch-capability probe (private mmap, no live code) =====");
-
-    uintptr_t fileoff = 0;
-    if (!styx_fileoff_for_rva(rva, &fileoff)) {
-        styx_log("[caps] could not map rva 0x%lx to a file offset", (unsigned long)rva);
-        return;
-    }
-
-    const char *path = styx_main_path();
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        styx_log("[caps] open(%s) failed", path ? path : "(null)");
-        return;
-    }
-
-    size_t pg = styx_page_size();
-    off_t poff = (off_t)(fileoff & ~(uintptr_t)(pg - 1));
-    void *m = mmap(NULL, pg, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, poff);
-    close(fd);
-    if (m == MAP_FAILED) {
-        styx_log("[caps] mmap(page) failed");
-        return;
-    }
-    styx_caps_report("baseline RX copy", (uintptr_t)m);
-
-    // Strategy A: vm_protect(READ|WRITE|COPY) then restore READ|EXECUTE.
-    {
-        kern_return_t k1 = styx_protect((uintptr_t)m, pg,
-                                        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY, false);
-        memset(m, 0x90, 4); // ARM64 NOP
-        kern_return_t k2 = styx_protect((uintptr_t)m, pg, VM_PROT_READ | VM_PROT_EXECUTE, false);
-        styx_log("[caps] A vm_protect(COPY)=%d restore(RX)=%d", (int)k1, (int)k2);
-        styx_caps_report("A after restore", (uintptr_t)m);
-    }
-
-    // Strategy B: POSIX mprotect(RW) then mprotect(RX).
-    {
-        int r1 = mprotect(m, pg, PROT_READ | PROT_WRITE);
-        memset(m, 0x90, 4);
-        int r2 = mprotect(m, pg, PROT_READ | PROT_EXEC);
-        styx_log("[caps] B mprotect(RW)=%d mprotect(RX)=%d", r1, r2);
-        styx_caps_report("B after restore", (uintptr_t)m);
-    }
-
-    // Strategy C: raise maximum to RWX, COPY-write, restore RX.
-    {
-        kern_return_t c0 = styx_protect((uintptr_t)m, pg,
-                                        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, true);
-        kern_return_t c1 = styx_protect((uintptr_t)m, pg,
-                                        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY, false);
-        memset(m, 0x90, 4);
-        kern_return_t c2 = styx_protect((uintptr_t)m, pg, VM_PROT_READ | VM_PROT_EXECUTE, false);
-        styx_log("[caps] C setmax(RWX)=%d copy=%d restore(RX)=%d", (int)c0, (int)c1, (int)c2);
-        styx_caps_report("C after restore", (uintptr_t)m);
-    }
-
-    munmap(m, pg);
-    styx_log("[caps] ===== probe done =====");
 }

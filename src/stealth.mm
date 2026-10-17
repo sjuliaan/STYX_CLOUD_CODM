@@ -1,10 +1,15 @@
-// stealth.mm — log-only ACE detection probe (v1).
+// stealth.mm — ACE detection bypass (v2).
 //
 // Strategy: the COD Mobile anti-cheat lives in the embedded frameworks
 // anogs / kgvmp_dy / enq_transceiver_dy / TDataMaster / CrashSight. All of
 // them use classic bindings (LC_DYLD_INFO_ONLY), so we can rebind their
-// imported libc / mach / dyld symbols per-image with fishhook and observe
-// exactly what they call. This build only LOGS; it hides nothing yet.
+// imported libc / mach / dyld symbols per-image with fishhook and (a) observe
+// and (b) filter what they see.
+//
+// v2 active filters: dyld image enumeration (our image removed from the list),
+// dladdr() (image hidden), sysctl P_TRACED scrub, and file-probe denial for
+// styx/frida/substrate/cydia-style paths. task_info / mach_vm_region_recurse /
+// proc_regionfilename stay log-only (Unity uses TASK_VM_INFO itself).
 //
 // Detection surface (from IDA recon of anogs + import scan of the siblings):
 //   module enum : _dyld_image_count / _dyld_get_image_name / _dyld_get_image_header
@@ -23,12 +28,14 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#include <sys/proc.h>
 #include <mach/mach.h>
 #include <mach-o/dyld.h>
 
@@ -121,6 +128,8 @@ static int path_interesting(const char *p) {
 static uint32_t             (*orig_dyld_image_count)(void)                      = NULL;
 static const char *         (*orig_dyld_get_image_name)(uint32_t)              = NULL;
 static const struct mach_header *(*orig_dyld_get_image_header)(uint32_t)       = NULL;
+static intptr_t             (*orig_dyld_get_image_vmaddr_slide)(uint32_t)      = NULL;
+static int                  (*orig_dladdr)(const void *, Dl_info *)            = NULL;
 
 static int  (*orig_sysctl)(int *, u_int, void *, size_t *, void *, size_t)     = NULL;
 static int  (*orig_sysctlbyname)(const char *, void *, size_t *, void *, size_t) = NULL;
@@ -155,12 +164,35 @@ static uint32_t g_c_dyld = 0, g_c_sys = 0, g_c_file = 0, g_c_task = 0,
 #define CAP_REGION 200u
 #define CAP_ENV    200u
 
+// Our own image, so the ACE cannot enumerate us via dyld or dladdr.
+static int   g_our_index  = -1;      // _dyld index of libstyx.dylib
+static void *g_our_header = NULL;    // its mach_header
+
+// Remap a caller-supplied dyld index so our image is invisible (the reported
+// list is simply shifted down by one after our slot).
+static inline uint32_t styx_dyld_remap(uint32_t idx) {
+    if (g_our_index >= 0 && idx >= (uint32_t)g_our_index) return idx + 1;
+    return idx;
+}
+
+// Paths whose access the ACE must not observe.
+static int path_denied(const char *p) {
+    static const char *keys[] = {
+        "styx", "frida", "substrate", "libhooker", "ellekit", "cydia",
+        "sileo", "odyssey", "trollstore", "dnssd", NULL
+    };
+    if (!p) return 0;
+    for (int i = 0; keys[i]; ++i)
+        if (istrstr(p, keys[i])) return 1;
+    return 0;
+}
+
 static uint32_t shim_dyld_image_count(void) {
     if (!g_armed || tls_hook) return orig_dyld_image_count();
     tls_hook = 1;
     uint32_t c = orig_dyld_image_count();
-    if (g_c_dyld++ < CAP_DYLD)
-        probe_printf("[dyld.count ] -> %u", c);
+    if (g_our_index >= 0 && (uint32_t)g_our_index < c) c--;
+    if (g_c_dyld++ < CAP_DYLD) probe_printf("[dyld.count ] -> %u (hidden our idx %d)", c, g_our_index);
     tls_hook = 0;
     return c;
 }
@@ -168,12 +200,10 @@ static uint32_t shim_dyld_image_count(void) {
 static const char *shim_dyld_get_image_name(uint32_t idx) {
     if (!g_armed || tls_hook) return orig_dyld_get_image_name(idx);
     tls_hook = 1;
-    const char *n = orig_dyld_get_image_name(idx);
-    if (g_c_dyld++ < CAP_DYLD) {
-        int ours = n && istrstr(n, "styx");
-        probe_printf("[dyld.name  ] [%u] %s%s", idx, n ? n : "(null)",
-                     ours ? "   <<< OUR DYLIB IS VISIBLE" : "");
-    }
+    uint32_t ridx = styx_dyld_remap(idx);
+    const char *n = orig_dyld_get_image_name(ridx);
+    if (g_c_dyld++ < CAP_DYLD)
+        probe_printf("[dyld.name  ] [%u->%u] %s", idx, ridx, n ? n : "(null)");
     tls_hook = 0;
     return n;
 }
@@ -181,11 +211,33 @@ static const char *shim_dyld_get_image_name(uint32_t idx) {
 static const struct mach_header *shim_dyld_get_image_header(uint32_t idx) {
     if (!g_armed || tls_hook) return orig_dyld_get_image_header(idx);
     tls_hook = 1;
-    const struct mach_header *h = orig_dyld_get_image_header(idx);
+    uint32_t ridx = styx_dyld_remap(idx);
+    const struct mach_header *h = orig_dyld_get_image_header(ridx);
     if (g_c_dyld++ < CAP_DYLD)
-        probe_printf("[dyld.head  ] [%u] %p", idx, (const void *)h);
+        probe_printf("[dyld.head  ] [%u->%u] %p", idx, ridx, (const void *)h);
     tls_hook = 0;
     return h;
+}
+
+static intptr_t shim_dyld_get_image_vmaddr_slide(uint32_t idx) {
+    if (!g_armed || tls_hook) return orig_dyld_get_image_vmaddr_slide(idx);
+    tls_hook = 1;
+    intptr_t s = orig_dyld_get_image_vmaddr_slide(styx_dyld_remap(idx));
+    tls_hook = 0;
+    return s;
+}
+
+static int shim_dladdr(const void *addr, Dl_info *info) {
+    if (!g_armed || tls_hook) return orig_dladdr(addr, info);
+    tls_hook = 1;
+    int r = orig_dladdr(addr, info);
+    if (r && info && g_our_header && info->dli_fbase == g_our_header) {
+        memset(info, 0, sizeof(*info));
+        r = 0;
+        if (g_c_dyld++ < CAP_DYLD) probe_printf("[dladdr     ] HID our image for %p", addr);
+    }
+    tls_hook = 0;
+    return r;
 }
 
 static int shim_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
@@ -198,6 +250,15 @@ static int shim_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
                      name && namelen > 1 ? name[1] : -1,
                      flag ? "   <<< P_TRACED / KERN_PROC" : "");
     int r = orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+    // Scrub P_TRACED from any KERN_PROC result (anti-debug probe).
+    if (r == 0 && flag && oldp && oldlenp &&
+        *oldlenp >= sizeof(struct kinfo_proc)) {
+        struct kinfo_proc *kp = (struct kinfo_proc *)oldp;
+        if (kp->kp_proc.p_flag & P_TRACED) {
+            kp->kp_proc.p_flag &= ~P_TRACED;
+            probe_printf("[sysctl     ] scrubbed P_TRACED");
+        }
+    }
     tls_hook = 0;
     return r;
 }
@@ -280,6 +341,7 @@ static kern_return_t shim_mach_vm_region_recurse(vm_map_t t, mach_vm_address_t *
 static int shim_stat(const char *p, struct stat *b) {
     if (!g_armed || tls_hook) return orig_stat(p, b);
     tls_hook = 1;
+    if (path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[stat       ] DENY %s", p); tls_hook = 0; errno = ENOENT; return -1; }
     if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[stat       ] %s", p ? p : "(null)");
     int r = orig_stat(p, b);
     tls_hook = 0;
@@ -289,6 +351,7 @@ static int shim_stat(const char *p, struct stat *b) {
 static int shim_lstat(const char *p, struct stat *b) {
     if (!g_armed || tls_hook) return orig_lstat(p, b);
     tls_hook = 1;
+    if (path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[lstat      ] DENY %s", p); tls_hook = 0; errno = ENOENT; return -1; }
     if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[lstat      ] %s", p ? p : "(null)");
     int r = orig_lstat(p, b);
     tls_hook = 0;
@@ -298,6 +361,7 @@ static int shim_lstat(const char *p, struct stat *b) {
 static int shim_access(const char *p, int m) {
     if (!g_armed || tls_hook) return orig_access(p, m);
     tls_hook = 1;
+    if (path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[access     ] DENY %s", p); tls_hook = 0; errno = ENOENT; return -1; }
     if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[access     ] %s mode=%d", p ? p : "(null)", m);
     int r = orig_access(p, m);
     tls_hook = 0;
@@ -311,6 +375,7 @@ static int shim_open(const char *p, int flags, ...) {
     }
     if (!g_armed || tls_hook) return orig_open(p, flags, mode);
     tls_hook = 1;
+    if (path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[open       ] DENY %s", p); tls_hook = 0; errno = ENOENT; return -1; }
     if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[open       ] %s flags=0x%x", p ? p : "(null)", flags);
     int r = orig_open(p, flags, mode);
     tls_hook = 0;
@@ -320,6 +385,7 @@ static int shim_open(const char *p, int flags, ...) {
 static FILE *shim_fopen(const char *p, const char *m) {
     if (!g_armed || tls_hook) return orig_fopen(p, m);
     tls_hook = 1;
+    if (path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[fopen      ] DENY %s", p); tls_hook = 0; errno = ENOENT; return NULL; }
     if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[fopen      ] %s mode=%s", p ? p : "(null)", m ? m : "(null)");
     FILE *r = orig_fopen(p, m);
     tls_hook = 0;
@@ -329,6 +395,7 @@ static FILE *shim_fopen(const char *p, const char *m) {
 static DIR *shim_opendir(const char *p) {
     if (!g_armed || tls_hook) return orig_opendir(p);
     tls_hook = 1;
+    if (path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[opendir    ] DENY %s", p); tls_hook = 0; errno = ENOENT; return NULL; }
     if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[opendir    ] %s", p ? p : "(null)");
     DIR *r = orig_opendir(p);
     tls_hook = 0;
@@ -338,6 +405,7 @@ static DIR *shim_opendir(const char *p) {
 static int shim_statfs(const char *p, struct statfs *b) {
     if (!g_armed || tls_hook) return orig_statfs(p, b);
     tls_hook = 1;
+    if (path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[statfs     ] DENY %s", p); tls_hook = 0; errno = ENOENT; return -1; }
     if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[statfs     ] %s", p ? p : "(null)");
     int r = orig_statfs(p, b);
     tls_hook = 0;
@@ -363,6 +431,8 @@ static struct rebinding g_rebinds[] = {
     { "_dyld_image_count",            (void *)shim_dyld_image_count,           (void **)&orig_dyld_image_count },
     { "_dyld_get_image_name",         (void *)shim_dyld_get_image_name,        (void **)&orig_dyld_get_image_name },
     { "_dyld_get_image_header",       (void *)shim_dyld_get_image_header,      (void **)&orig_dyld_get_image_header },
+    { "_dyld_get_image_vmaddr_slide", (void *)shim_dyld_get_image_vmaddr_slide, (void **)&orig_dyld_get_image_vmaddr_slide },
+    { "dladdr",                       (void *)shim_dladdr,                      (void **)&orig_dladdr },
     { "sysctl",                       (void *)shim_sysctl,                     (void **)&orig_sysctl },
     { "sysctlbyname",                 (void *)shim_sysctlbyname,               (void **)&orig_sysctlbyname },
     { "getpid",                       (void *)shim_getpid,                     (void **)&orig_getpid },
@@ -421,11 +491,24 @@ void styx_stealth_start(void) {
     started = 1;
 
     probe_open();
-    probe_printf("================ STYX ACE PROBE (log-only) ================");
+    probe_printf("================ STYX ACE BYPASS (v2) ================");
+
+    // Locate our own image so the ACE cannot enumerate us.
+    {
+        Dl_info info;
+        if (dladdr((void *)&styx_stealth_start, &info) != 0) {
+            g_our_header = info.dli_fbase;
+            uint32_t count = _dyld_image_count();
+            for (uint32_t i = 0; i < count; ++i) {
+                if (_dyld_get_image_header(i) == g_our_header) { g_our_index = (int)i; break; }
+            }
+        }
+        probe_printf("[self       ] header=%p dyld_idx=%d", g_our_header, g_our_index);
+    }
 
     rebind_targets();
 
     g_armed = 1;
-    probe_printf("[init       ] probe armed. Watching for detection calls...");
-    probe_printf("==========================================================");
+    probe_printf("[init       ] bypass armed. Filtering detection calls...");
+    probe_printf("======================================================");
 }

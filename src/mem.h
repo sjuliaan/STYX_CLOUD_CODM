@@ -48,13 +48,6 @@ bool styx_hook_branch(void *from, const void *to);
 // Naive byte-pattern scan; mask chars: 'x' = match, '?' = wildcard.
 uintptr_t styx_mem_scan(uintptr_t start, size_t size, const uint8_t *pattern, const char *mask);
 
-// Zero-risk capability probe: maps a PRIVATE copy of the page of the running
-// binary that contains `rva` and tests, on that copy, whether each known
-// protection strategy can make it writable AND restore EXECUTE. Logs the
-// kern_return codes and the resulting region prot/maxprot. Never touches the
-// live, signed game code.
-void styx_probe_patch_caps(uintptr_t rva);
-
 #ifdef __cplusplus
 }
 #endif

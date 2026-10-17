@@ -46,9 +46,25 @@ def inject(binary, dylib_name):
     if n == 0:
         sys.exit("error: no Mach-O slices found")
 
+    lt_dylib = lief.MachO.LoadCommand.TYPE.LOAD_DYLIB
     for i in range(n):
         bin_ = fat.at(i)
-        bin_.add_library(dylib_name)
+        if bin_.find_library(dylib_name) is not None:
+            print(f"[*] slice {i}: {dylib_name} already present, skipping")
+        else:
+            # Insert as the FIRST load-dylib so our constructor runs before the
+            # embedded anti-cheat frameworks (anogs/...) initialise. dyld still
+            # runs our own dependencies' initializers first, so this is safe.
+            first = next((idx for idx, c in enumerate(bin_.commands)
+                          if c.command == lt_dylib), None)
+            cmd = bin_.add_library(dylib_name)
+            if first is not None:
+                bin_.add(cmd, first)                      # insert a copy up front
+                if not bin_.remove_command(len(bin_.commands) - 1):
+                    sys.exit("error: failed to drop duplicate dylib command")
+                print(f"[*] slice {i}: inserted libstyx as first dependency")
+            else:
+                print(f"[*] slice {i}: appended libstyx (no existing LOAD_DYLIB)")
         if bin_.has_code_signature:
             bin_.remove_signature()
     fat.write(binary)

@@ -18,9 +18,9 @@
 #define STYX_RVA_WorldToScreenPoint_static    0x2650FDC  // static WorldToScreenPoint(Vector3) VA 0x102650FDC
 #define STYX_RVA_GamePlay_get_MatchGame       0x2390E20  // GamePlay.get_MatchGame()            VA 0x102390E20
 #define STYX_RVA_GamePlay_get_LocalPawn       0x2391F14  // GamePlay.get_LocalPawn()            VA 0x102391F14
-#define STYX_RVA_Pawn_GetAssitAimSpeed        0x266E378  // Pawn.GetAssitAimSpeed(...)          VA 0x10266E378 (virtual, Slot 80)
-#define STYX_RVA_Pawn_GetScaleRecoil          0x28FBD64  // Pawn.GetScaleRecoil()               VA 0x1028FBD64
-#define STYX_RVA_Pawn_GetRealSpreadModifier   0x28FA2D8  // Pawn.GetRealSpreadModifier()        VA 0x1028FA2D8
+#define STYX_RVA_Pawn_GetAssitAimSpeed        0x266E378  // PlayerController.GetAssitAimSpeed(Vector3,float,float,float,bool,bool)  VA 0x10266E378 (virtual, Slot 80)
+#define STYX_RVA_Pawn_GetScaleRecoil          0x28FBD64  // WeaponFireComponent_Instant.GetScaleRecoil()                 VA 0x1028FBD64
+#define STYX_RVA_Pawn_GetRealSpreadModifier   0x28FA2D8  // WeaponFireComponent_Instant.GetRealSpreadModifier()          VA 0x1028FA2D8
 
 // ---- IL2CPP runtime tables / writable data segments ------------------------
 // Both registration pointers live in __DATA_CONST (non-executable), so they can
