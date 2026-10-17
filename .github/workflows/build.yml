@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install ldid xz
+
+      - name: Install Theos
+        run: |
+          export THEOS="$HOME/theos"
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$THEOS"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+
+      - name: Link iOS SDK
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          VER="$(xcrun --sdk iphoneos --show-sdk-version)"
+          mkdir -p "$THEOS/sdks"
+          ln -sfn "$SDK" "$THEOS/sdks/iPhoneOS$VER.sdk"
+          echo "linked iPhoneOS$VER.sdk -> $SDK"
+
+      - name: Compile
+        run: make -j4
+
+      - name: Stage artifact
+        run: |
+          mkdir -p out
+          find .theos -name '*.dylib' -exec cp {} out/ \;
+          ls -la out
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: styx-dylib
+          path: out/*.dylib
+          if-no-files-found: error

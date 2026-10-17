@@ -1,0 +1,8 @@
+Package: com.styx.cloudcodm
+Name: STYX Cloud CODM
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: iOS CODM Garena mod engine (jailed / no-JIT)
+Maintainer: sjuliaan
+Author: sjuliaan
+Section: Tweaks
