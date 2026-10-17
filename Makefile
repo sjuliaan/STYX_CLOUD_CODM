@@ -14,7 +14,9 @@ styx_FILES += $(IMGUI)/imgui.cpp $(IMGUI)/imgui_draw.cpp $(IMGUI)/imgui_tables.c
 styx_FILES += $(IMGUI)/backends/imgui_impl_metal.mm
 
 styx_CFLAGS := -fobjc-arc -DNDEBUG -Isrc -Ithird_party/fishhook -I$(IMGUI) -I$(IMGUI)/backends
+styx_CFLAGS += -Wno-unused-variable -Wno-unused-but-set-variable
 styx_CCFLAGS := -std=c++17 -fno-exceptions -fno-rtti -O2 -DNDEBUG -I$(IMGUI) -I$(IMGUI)/backends
+styx_CCFLAGS += -Wno-unused-variable -Wno-unused-but-set-variable
 
 styx_LDFLAGS := -install_name @executable_path/Frameworks/libstyx.dylib
 styx_FRAMEWORKS := Foundation UIKit CoreGraphics QuartzCore Metal MetalKit
