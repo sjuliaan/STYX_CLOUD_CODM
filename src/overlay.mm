@@ -34,12 +34,16 @@ static bool       g_prevVisible = false;
 static int        g_drawFrames  = 0;
 
 static UIWindow *styx_key_window(void) {
+    UIWindow *first = nil;
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
         if (![s isKindOfClass:UIWindowScene.class]) continue;
         UIWindowScene *ws = (UIWindowScene *)s;
-        for (UIWindow *w in ws.windows) if (w.isKeyWindow) return w;
+        for (UIWindow *w in ws.windows) {
+            if (w.isKeyWindow) return w;
+            if (!first) first = w;
+        }
     }
-    return UIApplication.sharedApplication.keyWindow;
+    return first;
 }
 
 #pragma mark - Renderer
