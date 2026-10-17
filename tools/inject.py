@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
 """
-Inject libstyx.dylib into a decrypted CODM IPA (no jailbreak).
+Inject libstyx into a decrypted CODM IPA (no jailbreak) WITHOUT touching the
+main executable.
 
-  - adds an LC_LOAD_DYLIB load command to every slice of the main executable
-  - copies the dylib to <App>.app/Frameworks/libstyx.dylib
-  - strips the now-invalid code signature (Sideloadly re-signs the whole app)
+Technique (mirrors the reference mod exactly):
+
+  * The main executable `codm` binds its imports by dylib ORDINAL (it uses
+    LC_DYLD_CHAINED_FIXUPS and references ordinals 1..122). Inserting a new
+    load command into codm renumbers every ordinal >= the insertion point and
+    makes dyld abort at launch ("Symbol not found: _sqlite3_bind_blob"). So we
+    NEVER modify codm.
+  * Instead we APPEND `@rpath/libstyx.framework/libstyx` as the LAST
+    dependency of the existing framework
+        Frameworks/APMDeviceInfoSupport_dylib.framework/APMDeviceInfoSupport_dylib
+    (codm ordinal 40). Appending at the end shifts none of that host's own
+    ordinals, and codm is left byte-identical.
+  * The dylib is shipped inside a `.framework` wrapper under
+    Frameworks/libstyx.framework/ and resolved via codm's existing
+    `@executable_path/Frameworks` rpath (so `@rpath/...` maps to it).
 
 Requires: pip install lief
 
@@ -12,9 +25,11 @@ Usage:
   python tools/inject.py -i "com.garena.game.codm.ipa" -d out/libstyx.dylib -o STYX_CODM.ipa
 """
 import argparse
+import hashlib
 import os
 import plistlib
 import shutil
+import struct
 import sys
 import tempfile
 import zipfile
@@ -24,7 +39,27 @@ try:
 except ImportError:
     sys.exit("lief is required:  pip install lief")
 
-INSTALL_NAME = "@executable_path/Frameworks/libstyx.dylib"
+# Host framework that gets the extra dependency (codm ordinal 40).
+HOST_REL = "Frameworks/APMDeviceInfoSupport_dylib.framework/APMDeviceInfoSupport_dylib"
+# Our framework wrapper + the dependency path codm's @executable_path/Frameworks
+# rpath resolves to.
+FW_DIR = "Frameworks/libstyx.framework"
+FW_BIN = "libstyx"
+DEP_PATH = "@rpath/libstyx.framework/libstyx"
+
+FW_INFO = {
+    "CFBundleDevelopmentRegion": "en",
+    "CFBundleExecutable": FW_BIN,
+    "CFBundleIdentifier": "com.styx.libstyx",
+    "CFBundleInfoDictionaryVersion": "6.0",
+    "CFBundleName": FW_BIN,
+    "CFBundlePackageType": "FMWK",
+    "CFBundleShortVersionString": "1.0",
+    "CFBundleVersion": "1",
+    "CFBundleSupportedPlatforms": ["iPhoneOS"],
+    "MinimumOSVersion": "15.0",
+    "UIDeviceFamily": [1, 2],
+}
 
 
 def find_app(root):
@@ -37,43 +72,72 @@ def find_app(root):
     sys.exit("error: no .app bundle inside Payload/")
 
 
-def inject(binary, dylib_name):
-    fat = lief.MachO.parse(binary)
+def md5(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_dylibs(binary):
+    """Return the ordered list of LC_LOAD_DYLIB names in a Mach-O (raw parse)."""
+    with open(binary, "rb") as f:
+        d = f.read()
+    magic = struct.unpack_from("<I", d, 0)[0]
+    if magic not in (0xFEEDFACF, 0xFEEDFACD):  # arm64 / x86_64
+        sys.exit(f"error: not a thin 64-bit Mach-O: {binary}")
+    ncmds, _ = struct.unpack_from("<2I", d, 16)
+    off, names = 32, []
+    for _ in range(ncmds):
+        cmd, cs = struct.unpack_from("<2I", d, off)
+        if cmd == 0xC:  # LC_LOAD_DYLIB
+            no = struct.unpack_from("<I", d, off + 8)[0]
+            e = d.index(b"\0", off + no, off + cs)
+            names.append(d[off + no:e].decode("utf8", "replace"))
+        off += cs
+    return names
+
+
+def patch_host(host, dep):
+    """Append `dep` as the last LC_LOAD_DYLIB of the host framework binary."""
+    before = load_dylibs(host)
+    if dep in before:
+        print(f"[*] host already depends on {dep}; leaving as-is")
+        return before, before
+
+    fat = lief.MachO.parse(host)
     if fat is None:
-        sys.exit(f"error: lief could not parse {binary}")
+        sys.exit(f"error: lief could not parse {host}")
+    for i in range(len(fat)):
+        b = fat.at(i)
+        b.add_library(dep)  # appended at the end of the load-command list
+        if b.has_code_signature:
+            b.remove_signature()
+    fat.write(host)
 
-    n = len(fat)
-    if n == 0:
-        sys.exit("error: no Mach-O slices found")
+    after = load_dylibs(host)
+    return before, after
 
-    lt_dylib = lief.MachO.LoadCommand.TYPE.LOAD_DYLIB
-    for i in range(n):
-        bin_ = fat.at(i)
-        if bin_.find_library(dylib_name) is not None:
-            print(f"[*] slice {i}: {dylib_name} already present, skipping")
-        else:
-            # Insert as the FIRST load-dylib so our constructor runs before the
-            # embedded anti-cheat frameworks (anogs/...) initialise. dyld still
-            # runs our own dependencies' initializers first, so this is safe.
-            first = next((idx for idx, c in enumerate(bin_.commands)
-                          if c.command == lt_dylib), None)
-            cmd = bin_.add_library(dylib_name)
-            if first is not None:
-                bin_.add(cmd, first)                      # insert a copy up front
-                if not bin_.remove_command(len(bin_.commands) - 1):
-                    sys.exit("error: failed to drop duplicate dylib command")
-                print(f"[*] slice {i}: inserted libstyx as first dependency")
-            else:
-                print(f"[*] slice {i}: appended libstyx (no existing LOAD_DYLIB)")
-        if bin_.has_code_signature:
-            bin_.remove_signature()
-    fat.write(binary)
-    return n
+
+def verify(host, dep, before, after, codm, codm_md5):
+    ok = True
+    if after != before + [dep]:
+        print(f"[!] FAIL: host dylib list = {after} (expected {before} + [{dep}])")
+        ok = False
+    if md5(codm) != codm_md5:
+        print("[!] FAIL: codm main executable was modified!")
+        ok = False
+    if dep in load_dylibs(codm):
+        print("[!] FAIL: codm references our dylib (ordinals would shift)!")
+        ok = False
+    if not ok:
+        sys.exit("error: post-injection verification failed")
+    print("[+] verify: codm untouched; host gained exactly one dep at the end")
 
 
 def enable_file_sharing(app_dir):
-    """Expose the app's Documents/ folder in the Files app so the probe log
-    (Documents/styx_ace.log) can be pulled off the device without a jailbreak."""
+    """Expose Documents/ in the Files app so styx.log can be pulled off-device."""
     p = os.path.join(app_dir, "Info.plist")
     with open(p, "rb") as f:
         info = plistlib.load(f)
@@ -87,7 +151,7 @@ def enable_file_sharing(app_dir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-i", "--ipa", required=True, help="decrypted input IPA")
-    ap.add_argument("-d", "--dylib", required=True, help="libstyx.dylib to inject")
+    ap.add_argument("-d", "--dylib", required=True, help="built libstyx.dylib")
     ap.add_argument("-o", "--out", required=True, help="output IPA path")
     ap.add_argument("--binary", default=None, help="executable name (default: app name)")
     args = ap.parse_args()
@@ -104,22 +168,39 @@ def main():
 
         app = find_app(td)
         app_name = os.path.basename(app)[:-4]
-        binary = os.path.join(app, args.binary or app_name)
-        if not os.path.isfile(binary):
-            sys.exit(f"error: executable not found: {binary}")
+        codm = os.path.join(app, args.binary or app_name)
+        if not os.path.isfile(codm):
+            sys.exit(f"error: executable not found: {codm}")
+        codm_md5 = md5(codm)
 
-        print(f"[*] injecting {INSTALL_NAME} into {os.path.relpath(binary, td)}")
-        slices = inject(binary, INSTALL_NAME)
-        print(f"[*] patched {slices} Mach-O slice(s)")
+        host = os.path.join(app, HOST_REL)
+        if not os.path.isfile(host):
+            sys.exit(f"error: host framework not found: {host}")
 
-        fw = os.path.join(app, "Frameworks")
+        # 1. Append our dependency to the host framework (never touch codm).
+        before, after = patch_host(host, DEP_PATH)
+        print(f"[*] host deps {len(before)} -> {len(after)} (appended {DEP_PATH})")
+
+        # 2. Drop the host framework's now-stale signature envelope.
+        csig = os.path.join(os.path.dirname(host), "_CodeSignature")
+        if os.path.isdir(csig):
+            shutil.rmtree(csig)
+            print("[*] removed stale _CodeSignature from host framework")
+
+        # 3. Ship the dylib inside Frameworks/libstyx.framework/.
+        fw = os.path.join(app, FW_DIR)
         os.makedirs(fw, exist_ok=True)
-        dst = os.path.join(fw, "libstyx.dylib")
-        shutil.copyfile(args.dylib, dst)
-        print(f"[*] copied dylib -> {os.path.relpath(dst, td)}")
+        shutil.copyfile(args.dylib, os.path.join(fw, FW_BIN))
+        with open(os.path.join(fw, "Info.plist"), "wb") as f:
+            plistlib.dump(FW_INFO, f)
+        print(f"[*] wrote {os.path.relpath(fw, td)}/{FW_BIN} + Info.plist")
 
+        # 4. Files-app access for the on-device log.
         plist = enable_file_sharing(app)
         print(f"[*] enabled file sharing in {os.path.relpath(plist, td)}")
+
+        # 5. Prove nothing shifted.
+        verify(host, DEP_PATH, before, after, codm, codm_md5)
 
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         if os.path.exists(args.out):

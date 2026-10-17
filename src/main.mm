@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
 
 #include "base.h"
@@ -11,6 +12,19 @@
 #include "overlay.h"
 #include "stealth.h"
 #include "styxlog.h"
+
+// Mirror the reference mod: the overlay (Metal/MTKView/ImGui) is only built
+// once the app has finished launching, so a live window scene exists. Hooks and
+// the ACE probe are still installed from the constructor, as early as possible.
+static void styx_on_did_finish_launching(CFNotificationCenterRef center,
+                                         void *observer,
+                                         CFNotificationName name,
+                                         const void *object,
+                                         CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    styx_log("[overlay] UIApplicationDidFinishLaunching -> bringing up overlay");
+    styx_overlay_start();
+}
 
 __attribute__((constructor))
 static void styx_init(void) {
@@ -72,8 +86,15 @@ static void styx_init(void) {
         // Skip-guest-tutorial hook (acts only when STYX_FEAT_SKIP_TUT is on).
         styx_skip_tutorial_install();
 
-        // Bring up the Metal + ImGui overlay (own command queue / MTKView).
-        styx_overlay_start();
+        // Bring up the Metal + ImGui overlay only after the app finishes
+        // launching (same deferral the reference mod uses), so the MTKView is
+        // attached to a live scene.
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetLocalCenter(), NULL,
+            &styx_on_did_finish_launching,
+            (__bridge CFStringRef)UIApplicationDidFinishLaunchingNotification,
+            NULL, CFNotificationSuspensionBehaviorDrop);
+        styx_log("overlay armed (waits for UIApplicationDidFinishLaunching)");
 
         styx_log("loader ready (data-redirection build)");
         styx_log("================================================");
