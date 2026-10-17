@@ -13,6 +13,7 @@ Usage:
 """
 import argparse
 import os
+import plistlib
 import shutil
 import sys
 import tempfile
@@ -54,6 +55,19 @@ def inject(binary, dylib_name):
     return n
 
 
+def enable_file_sharing(app_dir):
+    """Expose the app's Documents/ folder in the Files app so the probe log
+    (Documents/styx_ace.log) can be pulled off the device without a jailbreak."""
+    p = os.path.join(app_dir, "Info.plist")
+    with open(p, "rb") as f:
+        info = plistlib.load(f)
+    info["UIFileSharingEnabled"] = True
+    info["LSSupportsOpeningDocumentsInPlace"] = True
+    with open(p, "wb") as f:
+        plistlib.dump(info, f)
+    return p
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-i", "--ipa", required=True, help="decrypted input IPA")
@@ -87,6 +101,9 @@ def main():
         dst = os.path.join(fw, "libstyx.dylib")
         shutil.copyfile(args.dylib, dst)
         print(f"[*] copied dylib -> {os.path.relpath(dst, td)}")
+
+        plist = enable_file_sharing(app)
+        print(f"[*] enabled file sharing in {os.path.relpath(plist, td)}")
 
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         if os.path.exists(args.out):
