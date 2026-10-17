@@ -2,19 +2,16 @@
 #import <mach-o/dyld.h>
 
 #include "base.h"
+#include "crashguard.h"
 #include "mem.h"
 #include "offsets.h"
 #include "stealth.h"
 #include "styxlog.h"
 
-// A self-contained function used to validate the no-JIT patch layer without
-// touching game code (safe no-op: we write the same bytes back).
-static int __attribute__((noinline)) styx_selftest_target(void) {
-    return 0x5A5A;
-}
-
 __attribute__((constructor))
 static void styx_init(void) {
+    styx_crashguard_install();
+
     @autoreleasepool {
         uintptr_t base = styx_main_base();
 
@@ -39,19 +36,19 @@ static void styx_init(void) {
         else
             styx_log("probe MatchGame FAILED");
 
-        // Validate the vm_remap write path on our own code (no-op write).
-        uint32_t cur = 0;
-        if (styx_mem_read((const void *)&styx_selftest_target, &cur, sizeof(cur))) {
-            bool ok = styx_mem_write((void *)&styx_selftest_target, &cur, sizeof(cur));
-            styx_log("mem_write self-test: %s (val 0x%08x)", ok ? "OK" : "FAIL", cur);
-        } else {
-            styx_log("mem_read self-test FAILED");
+        // Arm the ACE detection probe before any code patching, so we still
+        // get the probe log even if a later write faults.
+        styx_stealth_start();
+
+        // Capability test: no-op write of the same bytes to a GAME code page.
+        // Confirms whether vm_protect(VM_PROT_COPY) is permitted on a signed
+        // __TEXT page on this iOS build.
+        if (styx_mem_read((const void *)matchGame, &insn, sizeof(insn))) {
+            bool ok = styx_mem_write((void *)matchGame, &insn, sizeof(insn));
+            styx_log("vm_protect write test: %s", ok ? "OK" : "FAIL");
         }
 
         styx_log("loader ready (feature build pending)");
         styx_log("================================================");
-
-        // Install the log-only anti-cheat detection probe.
-        styx_stealth_start();
     }
 }

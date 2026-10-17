@@ -7,8 +7,8 @@ extern "C" {
 #endif
 
 // Write `len` bytes at `address` even if the page is read-only executable.
-// Uses the KittyMemory-style vm_copy -> RW map -> mprotect RX -> mach_vm_remap
-// technique, which works on a jailed device without JIT.
+// Uses vm_protect + VM_PROT_COPY (private copy-on-write), which works on a
+// jailed device without JIT. Refuses to patch libstyx's own image.
 bool styx_mem_write(void *address, const void *buffer, size_t len);
 
 // Read `len` bytes from `address`.
