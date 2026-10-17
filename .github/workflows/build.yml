@@ -34,12 +34,13 @@ jobs:
       - name: Stage artifact
         run: |
           mkdir -p out
-          find .theos -name '*.dylib' -exec cp {} out/ \;
+          DYLIB="$(find .theos -name '*.dylib' | head -n1)"
+          cp "$DYLIB" out/libstyx.dylib
           ls -la out
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: styx-dylib
-          path: out/*.dylib
+          path: out/libstyx.dylib
           if-no-files-found: error
