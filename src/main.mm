@@ -3,6 +3,7 @@
 
 #include "base.h"
 #include "crashguard.h"
+#include "hook.h"
 #include "mem.h"
 #include "offsets.h"
 #include "stealth.h"
@@ -36,19 +37,33 @@ static void styx_init(void) {
         else
             styx_log("probe MatchGame FAILED");
 
-        // Arm the ACE detection probe before any code patching, so we still
-        // get the probe log even if a later write faults.
+        // Arm the ACE detection probe before any patching, so we still get the
+        // probe log even if a later write faults.
         styx_stealth_start();
 
-        // Capability test: no-op write of the same bytes to a GAME code page.
-        // Confirms whether vm_protect(VM_PROT_COPY) is permitted on a signed
-        // __TEXT page on this iOS build.
-        if (styx_mem_read((const void *)matchGame, &insn, sizeof(insn))) {
-            bool ok = styx_mem_write((void *)matchGame, &insn, sizeof(insn));
-            styx_log("vm_protect write test: %s", ok ? "OK" : "FAIL");
+        // Zero-risk capability probe: maps a PRIVATE copy of the MatchGame
+        // page and tests each protection strategy on it. Never touches the
+        // live signed game code.
+        styx_probe_patch_caps(STYX_RVA_GamePlay_get_MatchGame);
+
+        // Discovery only (no patching): how many __DATA/__DATA_CONST slots
+        // reference each hook target? This is the data-redirection hook engine.
+        static const struct { const char *name; uintptr_t rva; } targets[] = {
+            { "get_MatchGame",        STYX_RVA_GamePlay_get_MatchGame },
+            { "get_LocalPawn",        STYX_RVA_GamePlay_get_LocalPawn },
+            { "Camera_WorldToScreen", STYX_RVA_Camera_WorldToScreenPoint },
+            { "get_main",             STYX_RVA_Camera_get_main },
+            { "GetAssitAimSpeed",     STYX_RVA_Pawn_GetAssitAimSpeed },
+            { "GetScaleRecoil",       STYX_RVA_Pawn_GetScaleRecoil },
+            { "GetRealSpreadModifier",STYX_RVA_Pawn_GetRealSpreadModifier },
+        };
+        for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
+            size_t n = styx_method_find_slots(targets[i].rva, NULL, 0);
+            styx_log("slots[%-22s] rva=0x%-8lx count=%zu",
+                     targets[i].name, (unsigned long)targets[i].rva, n);
         }
 
-        styx_log("loader ready (feature build pending)");
+        styx_log("loader ready (data-redirection build)");
         styx_log("================================================");
     }
 }

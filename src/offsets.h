@@ -22,6 +22,18 @@
 #define STYX_RVA_Pawn_GetScaleRecoil          0x28FBD64  // Pawn.GetScaleRecoil()               VA 0x1028FBD64
 #define STYX_RVA_Pawn_GetRealSpreadModifier   0x28FA2D8  // Pawn.GetRealSpreadModifier()        VA 0x1028FA2D8
 
+// ---- IL2CPP runtime tables / writable data segments ------------------------
+// Both registration pointers live in __DATA_CONST (non-executable), so they can
+// be read and their pointer tables redirected without touching signed code.
+#define STYX_RVA_IL2CPP_CODE_REGISTRATION     0xC469B18  // CodeRegistration*
+#define STYX_RVA_IL2CPP_METADATA_REGISTRATION 0xC6CABD8  // MetadataRegistration*
+
+// Main-image data segment layout (see the Mach-O note at the top of the file).
+#define STYX_RVA_DATA_CONST  0xC44C000
+#define STYX_SIZE_DATA_CONST 0xD30000
+#define STYX_RVA_DATA        0xD17C000
+#define STYX_SIZE_DATA       0xC60000
+
 // ---- field offsets (same as Android) ---------------------------------------
 #define Pawn_m_IsAlive                    0x548
 #define Pawn_m_Mesh                       0x628
