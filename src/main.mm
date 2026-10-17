@@ -2,11 +2,13 @@
 #import <mach-o/dyld.h>
 
 #include "base.h"
+#include "config.h"
 #include "crashguard.h"
 #include "features.h"
 #include "hook.h"
 #include "mem.h"
 #include "offsets.h"
+#include "overlay.h"
 #include "stealth.h"
 #include "styxlog.h"
 
@@ -21,6 +23,9 @@ static void styx_init(void) {
         styx_log("main image : %s", styx_main_path());
         styx_log("base       : 0x%lx", (unsigned long)base);
         styx_log("slide      : 0x%lx", (unsigned long)styx_main_slide());
+
+        // Load persisted feature flags (all off unless styx.cfg says otherwise).
+        styx_cfg_init();
 
         uintptr_t matchGame = styx_addr(STYX_RVA_GamePlay_get_MatchGame);
         uintptr_t localPawn = styx_addr(STYX_RVA_GamePlay_get_LocalPawn);
@@ -51,6 +56,9 @@ static void styx_init(void) {
             { "GetAssitAimSpeed",      STYX_RVA_Pawn_GetAssitAimSpeed },
             { "GetScaleRecoil",        STYX_RVA_Pawn_GetScaleRecoil },
             { "GetRealSpreadModifier", STYX_RVA_Pawn_GetRealSpreadModifier },
+            { "GetEnemyPawns",         STYX_RVA_BaseGame_GetEnemyPawns },
+            { "Transform_get_pos",     STYX_RVA_Transform_get_position },
+            { "UISceneInited",         STYX_RVA_FrontEndUIScene_DoSomeThingOnUISceneInited },
         };
         for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
             size_t n = styx_method_find_slots(targets[i].rva, NULL, 0);
@@ -60,6 +68,12 @@ static void styx_init(void) {
 
         // Install the aim feature hooks (data-pointer redirection).
         styx_aim_install();
+
+        // Skip-guest-tutorial hook (acts only when STYX_FEAT_SKIP_TUT is on).
+        styx_skip_tutorial_install();
+
+        // Bring up the Metal + ImGui overlay (own command queue / MTKView).
+        styx_overlay_start();
 
         styx_log("loader ready (data-redirection build)");
         styx_log("================================================");

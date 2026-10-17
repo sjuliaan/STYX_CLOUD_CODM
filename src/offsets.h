@@ -22,6 +22,20 @@
 #define STYX_RVA_Pawn_GetScaleRecoil          0x28FBD64  // WeaponFireComponent_Instant.GetScaleRecoil()                 VA 0x1028FBD64
 #define STYX_RVA_Pawn_GetRealSpreadModifier   0x28FA2D8  // WeaponFireComponent_Instant.GetRealSpreadModifier()          VA 0x1028FA2D8
 
+// ---- ESP / menu / tutorial / guest-account RVAs (1.6.58 iOS) ---------------
+// `static`/`instance` below is taken from dump.cs (authoritative). The dumper's
+// script.json "Signature" prepends a phantom `__this` even for static methods
+// (e.g. Camera.get_main), so it is NOT a reliable indicator of static-ness.
+#define STYX_RVA_GamePlay_get_LocalPC         0x2391DAC  // GamePlay.get_LocalPC()             VA 0x102391DAC  static -> PlayerController*
+#define STYX_RVA_BaseGame_GetEnemyPawns       0xF2E810   // BaseGame.GetEnemyPawns()           VA 0x100F2E810  instance -> PawnList*
+#define STYX_RVA_Pawn_get_IsAlive             0x186CAC4  // Pawn.get_IsAlive()                 VA 0x10186CAC4  instance -> bool
+#define STYX_RVA_Transform_get_position       0x8AB648   // Transform.get_position()           VA 0x1008AB648  instance -> Vector3
+#define STYX_RVA_Screen_get_width             0x8A7E27C  // Screen.get_width()                 VA 0x108A7E27C  static -> int32
+#define STYX_RVA_Screen_get_height            0x8A7E2F0  // Screen.get_height()                VA 0x108A7E2F0  static -> int32
+#define STYX_RVA_MSDKLogin_ResetGuest         0x4099838  // MSDKLogin.ResetGuest()             VA 0x104099838  static -> void
+#define STYX_RVA_FrontEndUIScene_DoSomeThingOnUISceneInited          0xB28718  // FrontEndUIScene.DoSomeThingOnUISceneInited()           instance -> void
+#define STYX_RVA_FrontEndUIScene_MarkTutorialFinishedFromAppLauncher 0xB297AC  // FrontEndUIScene.MarkTutorialFinishedFromAppLauncher()  instance -> void
+
 // ---- IL2CPP runtime tables / writable data segments ------------------------
 // Both registration pointers live in __DATA_CONST (non-executable), so they can
 // be read and their pointer tables redirected without touching signed code.
@@ -47,5 +61,13 @@
 
 // !! BaseGame field table is obfuscated as 0xFFFFFFFF in metadata; Android value
 // is 0x178 and every other Pawn/AttackableTarget field matched exactly. Confirm
-// at runtime before shipping.
+// at runtime before shipping. (Superseded by GetEnemyPawns(); kept for reference.)
 #define BaseGame_EnemyPawns               0x178
+
+// ---- il2cpp System.Collections.Generic.List<T> layout ----------------------
+// PawnList derives from List<Pawn>, so iterating it means walking these fields.
+// VERIFY at runtime: log _size on the first frames (a wrong offset shows up as
+// size==0 rather than a fault).
+#define IL2CPP_LIST_ITEMS  0x10   // T[]  _items
+#define IL2CPP_LIST_SIZE   0x18   // int32 _size
+#define IL2CPP_ARRAY_DATA  0x10   // first element of an Il2CppArray
