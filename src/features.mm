@@ -16,7 +16,6 @@
 
 #define STYX_RECOIL_SCALE 0.05f   // 1.0 = vanilla, 0.0 = no recoil
 #define STYX_SPREAD_SCALE 0.05f   // 1.0 = vanilla, 0.0 = no spread
-#define STYX_ASSIST_SCALE 3.00f   // 1.0 = vanilla, >1 = stronger aim assist
 
 // UnityEngine.Vector3_o (il2cpp) is exactly { float x, y, z; }.
 typedef struct { float x, y, z; } StyVector3;
@@ -56,13 +55,18 @@ static float hook_spread(void *self, const void *method) {
 }
 
 // ---- GetAssitAimSpeed ------------------------------------------------------
+// Absolute override (same semantics as the Android mod): while the feature is on
+// we return the strength slider value (0..100) verbatim and DO NOT call the
+// original. The slider is the aim speed, so 0 turns assist off.
 static float hook_assist(void *self, StyVector3 pos, float assistDis, float dis,
                          float angle, bool isPVE, bool gamepad, const void *method) {
-    float v = orig_assist ? orig_assist(self, pos, assistDis, dis, angle, isPVE, gamepad, method) : 0.0f;
-    if (!styx_feat(STYX_FEAT_ASSIST)) return v;
-    static int n = 0;
-    if (n < STYX_LOG_CALLS) { styx_log("[aim] GetAssitAimSpeed %.4f -> %.4f", v, v * STYX_ASSIST_SCALE); n++; }
-    return v * STYX_ASSIST_SCALE;
+    if (styx_feat(STYX_FEAT_ASSIST)) {
+        float s = styx_assist_strength();
+        static int n = 0;
+        if (n < STYX_LOG_CALLS) { styx_log("[aim] GetAssitAimSpeed -> %.2f (orig skipped)", (double)s); n++; }
+        return s;
+    }
+    return orig_assist ? orig_assist(self, pos, assistDis, dis, angle, isPVE, gamepad, method) : 0.0f;
 }
 
 void styx_aim_install(void) {

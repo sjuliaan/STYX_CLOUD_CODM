@@ -32,6 +32,12 @@ bool styx_feat(styx_feature f);
 void styx_feat_set(styx_feature f, bool on);
 void styx_feat_toggle(styx_feature f);
 
+// Aim-assist strength, 0..100, returned verbatim by the aim-assist hook while
+// STYX_FEAT_ASSIST is on (absolute override, matching the Android mod). Persisted
+// in styx.cfg as `assist_strength=NN`. Default 50.
+float styx_assist_strength(void);
+void  styx_assist_strength_set(float v);
+
 // Stable key used in styx.cfg (e.g. "esp").
 const char *styx_feat_key(styx_feature f);
 // Human label shown in the menu (e.g. "ESP").

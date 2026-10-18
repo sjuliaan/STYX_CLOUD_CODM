@@ -29,7 +29,7 @@
 #define STYX_RVA_GamePlay_get_LocalPC         0x2391DAC  // GamePlay.get_LocalPC()             VA 0x102391DAC  static -> PlayerController*
 #define STYX_RVA_BaseGame_GetEnemyPawns       0xF2E810   // BaseGame.GetEnemyPawns()           VA 0x100F2E810  instance -> PawnList*
 #define STYX_RVA_Pawn_get_IsAlive             0x186CAC4  // Pawn.get_IsAlive()                 VA 0x10186CAC4  instance -> bool
-#define STYX_RVA_Transform_get_position       0x8AB648   // Transform.get_position()           VA 0x1008AB648  instance -> Vector3
+#define STYX_RVA_Transform_get_position       0x8AB0638  // Transform.get_position()           VA 0x1008AB0638 instance -> Vector3
 #define STYX_RVA_Screen_get_width             0x8A7E27C  // Screen.get_width()                 VA 0x108A7E27C  static -> int32
 #define STYX_RVA_Screen_get_height            0x8A7E2F0  // Screen.get_height()                VA 0x108A7E2F0  static -> int32
 #define STYX_RVA_MSDKLogin_ResetGuest         0x4099838  // MSDKLogin.ResetGuest()             VA 0x104099838  static -> void
@@ -59,15 +59,16 @@
 #define AttackableTarget_m_Health         0x34
 #define AttackableTarget_m_MaxHealth      0x38
 
-// !! BaseGame field table is obfuscated as 0xFFFFFFFF in metadata; Android value
-// is 0x178 and every other Pawn/AttackableTarget field matched exactly. Confirm
-// at runtime before shipping. (Superseded by GetEnemyPawns(); kept for reference.)
+// MatchGame -> BaseGame.EnemyPawns list. Confirmed three ways: the Android mod
+// (Defines.h `n = 0x178`), the rival dylib (`ADD X8,X26,#0x178` then item walk),
+// and dump.cs. Esp.mm/game.mm read this field directly (no GetEnemyPawns call).
 #define BaseGame_EnemyPawns               0x178
 
 // ---- il2cpp System.Collections.Generic.List<T> layout ----------------------
 // PawnList derives from List<Pawn>, so iterating it means walking these fields.
-// VERIFY at runtime: log _size on the first frames (a wrong offset shows up as
-// size==0 rather than a fault).
 #define IL2CPP_LIST_ITEMS  0x10   // T[]  _items
 #define IL2CPP_LIST_SIZE   0x18   // int32 _size
-#define IL2CPP_ARRAY_DATA  0x10   // first element of an Il2CppArray
+// Il2CppArray<T> = { Il2CppClass* klass; void* monitor; void* bounds; int32 max_length; T m_Items[]; }
+// so the first element sits at +0x20 (proven by codm List<T>.get_Item `ldrb w0,[x8,#0x20]`,
+// by the Android SDK Il2CppArray, and by the rival ESP `LDR X20,[X8,#0x20]`).
+#define IL2CPP_ARRAY_DATA  0x20   // first element of an Il2CppArray

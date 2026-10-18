@@ -147,6 +147,16 @@ static void draw_panel(void) {
                     styx_cfg_save();
                 }
             }
+            if (styx_feat(STYX_FEAT_ASSIST)) {
+                ImGui::Indent();
+                float s = styx_assist_strength();
+                ImGui::SetNextItemWidth(160.0f);
+                if (ImGui::SliderFloat("Strength", &s, 0.0f, 100.0f, "%.0f")) {
+                    styx_assist_strength_set(s);
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit()) styx_cfg_save();
+                ImGui::Unindent();
+            }
         }
 
         if (ImGui::CollapsingHeader("Visuals (ESP)", ImGuiTreeNodeFlags_DefaultOpen)) {

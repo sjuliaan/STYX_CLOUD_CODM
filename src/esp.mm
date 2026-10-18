@@ -21,6 +21,7 @@
 // ---------------------------------------------------------------------------
 
 #define STYX_ESP_MAX 64
+#define STYX_HEAD_HEIGHT 1.6f   // world-Y fallback when the head bone is unreadable
 
 typedef struct {
     bool  valid;
@@ -72,15 +73,21 @@ void styx_esp_collect(float view_w, float view_h) {
         void *p = pawns[i];
         if (!styx_game_pawn_alive(p)) continue;
 
-        styx_v3 head, body;
-        bool haveHead = styx_game_pawn_head(p, &head);
-        bool haveBody = styx_game_pawn_position(p, &body);
-        if (!haveHead && !haveBody) continue;
+        // Body from the plain m_Location field (no call -> cannot fault). Head
+        // from the head bone when readable, otherwise a nominal world offset.
+        styx_v3 body;
+        if (!styx_game_pawn_location(p, &body)) continue;
+
+        styx_v3 head;
+        if (!styx_game_pawn_head(p, &head)) {
+            head = body;
+            head.y += STYX_HEAD_HEIGHT;
+        }
 
         styx_v3 hsp, bsp;
-        bool okH = haveHead && styx_game_world_to_screen(head, &hsp.x, &hsp.y, &hsp.z);
-        bool okB = haveBody && styx_game_world_to_screen(body, &bsp.x, &bsp.y, &bsp.z);
-        if (!okH && !okB) continue;
+        if (!styx_game_world_to_screen(head, &hsp.x, &hsp.y, &hsp.z)) continue;
+        if (!styx_game_world_to_screen(body, &bsp.x, &bsp.y, &bsp.z)) continue;
+        if (!styx_v3_finite(hsp) || !styx_v3_finite(bsp)) continue;
         // Skip projections behind the camera (Unity returns negative z or mirrors).
         if (hsp.z <= 0.0f && bsp.z <= 0.0f) continue;
 
@@ -101,6 +108,14 @@ void styx_esp_collect(float view_w, float view_h) {
             styx_log("[esp]   box0 head=(%.1f,%.1f) body=(%.1f,%.1f) hp=%.2f",
                      g_boxes[0].hx, g_boxes[0].hy, g_boxes[0].bx, g_boxes[0].by, g_boxes[0].health01);
         g_logged_frames++;
+    }
+
+    // If we are still seeing nothing after the first frames, dump one-shot
+    // diagnostics showing exactly which step of the enemy walk is empty.
+    static bool diag_done = false;
+    if (!diag_done && g_logged_frames >= 5 && g_count == 0) {
+        diag_done = true;
+        styx_game_diag();
     }
 }
 

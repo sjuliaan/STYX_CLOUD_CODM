@@ -19,13 +19,21 @@ void *styx_game_matchgame(void);   // MatchGame* (derives from BaseGame) or NULL
 void *styx_game_localpawn(void);   // local Pawn* or NULL
 void *styx_game_camera(void);      // main Camera* or NULL
 
-// Fills `out` with up to `max` alive enemy Pawn* (via BaseGame.GetEnemyPawns()).
-// Returns the number written. Returns 0 when not in a match / no enemies.
+// Fills `out` with up to `max` enemy Pawn* read directly from the MatchGame's
+// BaseGame.EnemyPawns list (+0x178) — the same access the proven Android mod and
+// the rival dylib use. Returns the number written (0 when not in a match).
 size_t styx_game_enemy_pawns(void **out, size_t max);
 
 bool styx_game_pawn_alive(void *pawn);
-bool styx_game_pawn_position(void *pawn, styx_v3 *out);   // body bone (m_Mesh)
+bool styx_game_pawn_position(void *pawn, styx_v3 *out);   // body bone (m_Mesh, calls get_position)
+bool styx_game_pawn_location(void *pawn, styx_v3 *out);   // plain m_Location field, no call
 bool styx_game_pawn_head(void *pawn, styx_v3 *out);       // head bone (m_HeadBone)
+
+// True when every component is finite (rejects NaN/Inf from a bad read).
+bool styx_v3_finite(styx_v3 v);
+
+// One-shot diagnostics: logs matchgame / enemy list / first few pawns once.
+void styx_game_diag(void);
 
 // Camera.WorldToScreenPoint. Returns false when there is no camera.
 // sx/sy/sz are in Unity render pixels (origin bottom-left, sz = view depth).
