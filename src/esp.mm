@@ -28,11 +28,14 @@ typedef struct {
     float hx, hy;   // head (points)
     float bx, by;   // body/feet (points)
     float health01; // 0..1, -1 if unknown
+    float mx, my, mz;   // body world pos (m_Mesh->get_position())
+    float wx, wy, wz;   // head world pos (m_HeadBone->get_position())
 } styx_esp_box;
 
 static styx_esp_box g_boxes[STYX_ESP_MAX];
 static int         g_count = 0;
 static int         g_logged_frames = 0;
+static int         g_frame_counter = 0;
 
 int styx_esp_enemy_count(void) { return g_count; }
 
@@ -73,10 +76,17 @@ void styx_esp_collect(float view_w, float view_h) {
         void *p = pawns[i];
         if (!styx_game_pawn_alive(p)) continue;
 
-        // Body from the plain m_Location field (no call -> cannot fault). Head
-        // from the head bone when readable, otherwise a nominal world offset.
+        // Body from the LIVE mesh transform (m_Mesh->get_position()), exactly as
+        // the proven Android mod's DrawESP does (RootPos = m_Mesh->get_position()).
+        // m_Location is a static/low-rate field, so using it froze the box at the
+        // enemy's spawn position. Head from the head bone when readable, otherwise
+        // a nominal world offset above the body.
         styx_v3 body;
-        if (!styx_game_pawn_location(p, &body)) continue;
+        if (!styx_game_pawn_position(p, &body)) {
+            // Only when the mesh transform is unreadable do we fall back to the
+            // plain m_Location field (no call -> cannot fault).
+            if (!styx_game_pawn_location(p, &body)) continue;
+        }
 
         styx_v3 head;
         if (!styx_game_pawn_head(p, &head)) {
@@ -97,6 +107,8 @@ void styx_esp_collect(float view_w, float view_h) {
         b->bx = bsp.x / (float)sw * view_w;
         b->by = (1.0f - bsp.y / (float)sh) * view_h;
         b->health01 = want_health ? styx_esp_health(p) : -1.0f;
+        b->mx = body.x; b->my = body.y; b->mz = body.z;
+        b->wx = head.x; b->wy = head.y; b->wz = head.z;
         b->valid = true;
         g_count++;
     }
@@ -105,9 +117,19 @@ void styx_esp_collect(float view_w, float view_h) {
         styx_log("[esp] frame %d: enemies=%zu boxes=%d (screen %dx%d)",
                  g_logged_frames, n, g_count, sw, sh);
         if (g_count > 0)
-            styx_log("[esp]   box0 head=(%.1f,%.1f) body=(%.1f,%.1f) hp=%.2f",
-                     g_boxes[0].hx, g_boxes[0].hy, g_boxes[0].bx, g_boxes[0].by, g_boxes[0].health01);
+            styx_log("[esp]   box0 mesh=(%.1f,%.1f,%.1f) head=(%.1f,%.1f,%.1f) pt=(%.1f,%.1f)",
+                     g_boxes[0].mx, g_boxes[0].my, g_boxes[0].mz,
+                     g_boxes[0].wx, g_boxes[0].wy, g_boxes[0].wz,
+                     g_boxes[0].bx, g_boxes[0].by);
         g_logged_frames++;
+    }
+
+    // Periodic tracking log (~every 2s at 60fps) so a moving enemy proves the box
+    // follows: mesh/head world coords must change frame to frame while in-game.
+    if ((g_frame_counter++ % 120) == 0 && g_count > 0) {
+        styx_log("[esp] track enemies=%zu box0 mesh=(%.1f,%.1f,%.1f) head=(%.1f,%.1f,%.1f)",
+                 n, g_boxes[0].mx, g_boxes[0].my, g_boxes[0].mz,
+                 g_boxes[0].wx, g_boxes[0].wy, g_boxes[0].wz);
     }
 
     // If we are still seeing nothing after the first frames, dump one-shot

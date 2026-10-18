@@ -72,7 +72,6 @@ static void styx_init(void) {
             { "GetRealSpreadModifier", STYX_RVA_Pawn_GetRealSpreadModifier },
             { "GetEnemyPawns",         STYX_RVA_BaseGame_GetEnemyPawns },
             { "Transform_get_pos",     STYX_RVA_Transform_get_position },
-            { "UISceneInited",         STYX_RVA_FrontEndUIScene_DoSomeThingOnUISceneInited },
         };
         for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
             size_t n = styx_method_find_slots(targets[i].rva, NULL, 0);
@@ -83,8 +82,9 @@ static void styx_init(void) {
         // Install the aim feature hooks (data-pointer redirection).
         styx_aim_install();
 
-        // Skip-guest-tutorial hook (acts only when STYX_FEAT_SKIP_TUT is on).
-        styx_skip_tutorial_install();
+        // Skip-guest-tutorial is applied from the overlay loop as a data-only
+        // write of TutorialManager's static flags (see game.mm/overlay.mm), so
+        // there is nothing to hook here.
 
         // Bring up the Metal + ImGui overlay only after the app finishes
         // launching (same deferral the reference mod uses), so the MTKView is

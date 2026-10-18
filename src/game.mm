@@ -27,6 +27,8 @@ typedef styx_v3 (*fn_self_arg_v3_t)(void *self, styx_v3 pos, const void *method)
 typedef int32_t (*fn_static_int_t)(const void *method);
 // static    void      MSDKLogin.ResetGuest(const MethodInfo*)
 typedef void (*fn_static_void_t)(const void *method);
+// static    bool      TutorialManager.IsTutorialEnabled(const MethodInfo*)
+typedef bool (*fn_static_bool_t)(const void *method);
 
 // Cheap plausibility check for a pointer read out of game memory. il2cpp
 // objects live in the app's address space and are 8-byte aligned. This filters
@@ -144,6 +146,39 @@ void styx_game_reset_guest(void) {
     styx_log("[guest] ResetGuest @ %p -> calling", (void *)f);
     if (f) f(NULL);
     styx_log("[guest] ResetGuest returned");
+}
+
+// ---------------------------------------------------------------------------
+// Skip guest tutorial — data-only write of TutorialManager's static bools.
+//
+// IsTutorialEnabled() is forced once so the codegen static-initialiser for
+// TutorialManager runs and leaves `*(base+ClassGlobal)` pointing at the
+// Il2CppClass. We then resolve static_fields and write the flags. The write is
+// idempotent and cheap, so the caller can re-apply it (the game's own
+// TutorialManager.Init() may overwrite the flags from config after this).
+// ---------------------------------------------------------------------------
+bool styx_game_skip_tutorial(void) {
+    // 1. Force the TutorialManager class to initialise (no side effects beyond
+    //    its cctor; the bool itself is unused here).
+    fn_static_bool_t is_enabled =
+        (fn_static_bool_t)styx_addr(STYX_RVA_TutorialManager_IsTutorialEnabled);
+    if (is_enabled) (void)is_enabled(NULL);
+
+    // 2. Resolve Il2CppClass* -> static_fields block.
+    uintptr_t cls = *(volatile uintptr_t *)styx_addr(STYX_RVA_TutorialManager_ClassGlobal);
+    if (!styx_ptr_ok(cls)) return false;
+    uintptr_t sf = *(volatile uintptr_t *)(cls + IL2CPP_CLASS_STATIC_FIELDS);
+    if (!styx_ptr_ok(sf)) return false;
+
+    // 3. Write the flags. Leave Inited (0x1) and m_EnableTutorialEditor (0x0)
+    //    untouched so we never disturb the game's initialisation state machine.
+    volatile uint8_t *b = (volatile uint8_t *)sf;
+    b[TutorialManager_sf_SkipTutorialFromAppLauncher] = 1;
+    b[TutorialManager_sf_m_TutorialEnable]            = 0;
+    b[TutorialManager_sf_m_PrologueEnable]            = 0;
+    b[TutorialManager_sf_m_TutorialFinalEnable]       = 0;
+    b[TutorialManager_sf_m_BRTutorialEnable]          = 0;
+    return true;
 }
 
 // ---------------------------------------------------------------------------

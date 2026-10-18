@@ -28,7 +28,6 @@ typedef struct { float x, y, z; } StyVector3;
 typedef float (*fn_self_t)(void *self, const void *method);
 typedef float (*fn_assist_t)(void *self, StyVector3 pos, float assistDis, float dis,
                              float angle, bool isPVE, bool gamepad, const void *method);
-typedef void  (*fn_self_void_t)(void *self, const void *method);
 
 static fn_self_t   orig_recoil  = 0;
 static fn_self_t   orig_spread  = 0;
@@ -92,27 +91,4 @@ void styx_aim_install(void) {
     }
 
     styx_log("-------------------");
-}
-
-// ---- Skip guest tutorial ---------------------------------------------------
-static fn_self_void_t orig_uisinited    = 0;
-static fn_self_void_t fn_mark_tutorial  = 0;
-
-static void hook_uisinited(void *self, const void *method) {
-    if (orig_uisinited) orig_uisinited(self, method);
-    if (styx_feat(STYX_FEAT_SKIP_TUT) && fn_mark_tutorial && self) {
-        static int n = 0;
-        if (n < 3) { styx_log("[skip] MarkTutorialFinishedFromAppLauncher(%p)", self); n++; }
-        fn_mark_tutorial(self, 0);
-    }
-}
-
-void styx_skip_tutorial_install(void) {
-    fn_mark_tutorial = (fn_self_void_t)styx_addr(STYX_RVA_FrontEndUIScene_MarkTutorialFinishedFromAppLauncher);
-    uintptr_t orig = 0;
-    size_t n = styx_method_hook(STYX_RVA_FrontEndUIScene_DoSomeThingOnUISceneInited,
-                                (void *)hook_uisinited, &orig);
-    orig_uisinited = (fn_self_void_t)orig;
-    styx_log("[skip] DoSomeThingOnUISceneInited: %zu slot(s), orig=%p mark=%p",
-             n, (void *)orig, (void *)fn_mark_tutorial);
 }

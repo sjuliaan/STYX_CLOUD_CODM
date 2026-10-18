@@ -36,6 +36,29 @@
 #define STYX_RVA_FrontEndUIScene_DoSomeThingOnUISceneInited          0xB28718  // FrontEndUIScene.DoSomeThingOnUISceneInited()           instance -> void
 #define STYX_RVA_FrontEndUIScene_MarkTutorialFinishedFromAppLauncher 0xB297AC  // FrontEndUIScene.MarkTutorialFinishedFromAppLauncher()  instance -> void
 
+// ---- TutorialManager static state (1.6.58 iOS) -----------------------------
+// Skip-tutorial is done as a DATA-ONLY write of TutorialManager's static bools
+// (no code patching — matches the rival's capability envelope and our W^X
+// constraint). We do NOT hook IsTutorialEnabled(): it has 48 direct BL callers,
+// so data-slot redirection cannot intercept it.
+//
+// TutorialManager.IsTutorialEnabled() (0x680C2E0) reads its class-pointer global
+// then `ldr x8,[x0,#0x78]; ldrb w8,[x8,#3]` (= static_fields[3] = m_TutorialEnable
+// per dump.cs), and get_EnableTutorialEditor() reads static_fields[0]. That proves
+// class+0x78 == static_fields and static_fields[off] == the dump.cs static field.
+// The class global is loaded by every TutorialManager static method as
+// `adrp x,#0xda1d000 ; add x,x,#0xe40` => *(base+0xDA1DE40) = Il2CppClass*.
+#define STYX_RVA_TutorialManager_ClassGlobal          0xDA1DE40  // Il2CppClass** for TutorialManager
+#define STYX_RVA_TutorialManager_IsTutorialEnabled    0x680C2E0  // static -> bool (forced once to init the class)
+#define IL2CPP_CLASS_STATIC_FIELDS                    0x78       // Il2CppClass -> static_fields block
+#define TutorialManager_sf_m_EnableTutorialEditor         0x0
+#define TutorialManager_sf_Inited                         0x1   // NEVER touch (init guard)
+#define TutorialManager_sf_SkipTutorialFromAppLauncher    0x2   // set 1
+#define TutorialManager_sf_m_TutorialEnable               0x3   // set 0
+#define TutorialManager_sf_m_PrologueEnable               0x4   // set 0
+#define TutorialManager_sf_m_TutorialFinalEnable          0x5   // set 0
+#define TutorialManager_sf_m_BRTutorialEnable             0x6   // set 0
+
 // ---- IL2CPP runtime tables / writable data segments ------------------------
 // Both registration pointers live in __DATA_CONST (non-executable), so they can
 // be read and their pointer tables redirected without touching signed code.

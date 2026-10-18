@@ -10,11 +10,11 @@ extern "C" {
 // menu toggles take effect immediately (default: off).
 void styx_aim_install(void);
 
-// Hook FrontEndUIScene.DoSomeThingOnUISceneInited so that, when the
-// STYX_FEAT_SKIP_TUT flag is on, we also call the game's own
-// MarkTutorialFinishedFromAppLauncher() for the same scene after the original
-// runs. Takes effect on the next FrontEndUIScene init.
-void styx_skip_tutorial_install(void);
+// Skip guest tutorial is NOT installed as a hook: IsTutorialEnabled() has 48
+// direct BL callers, so data-slot redirection cannot intercept it, and inline
+// patching is impossible under our W^X constraint. Instead the overlay loop
+// calls styx_game_skip_tutorial() (a data-only write of TutorialManager's static
+// flags) while STYX_FEAT_SKIP_TUT is on. See game.h.
 
 #ifdef __cplusplus
 }

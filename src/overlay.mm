@@ -6,6 +6,7 @@
 #include "overlay.h"
 #include "config.h"
 #include "esp.h"
+#include "game.h"
 #include "menu.h"
 #include "styxlog.h"
 
@@ -80,6 +81,24 @@ static UIWindow *styx_key_window(void) {
         styx_esp_collect((float)sz.width, (float)sz.height);
         styx_menu_draw();
         styx_esp_draw();
+
+        // Skip-tutorial: a data-only write of TutorialManager's static flags,
+        // re-applied (throttled ~1s) while enabled so the game's own
+        // TutorialManager.Init() or a server sync cannot re-enable it.
+        if (styx_feat(STYX_FEAT_SKIP_TUT)) {
+            static int tut_tick = 0;
+            if ((tut_tick++ % 60) == 0) {
+                bool ok = styx_game_skip_tutorial();
+                static int ok_log = 0, wait_log = 0;
+                if (ok && ok_log < 5) {
+                    styx_log("[tut] skip applied (TutorialManager static flags set)");
+                    ok_log++;
+                } else if (!ok && wait_log < 5) {
+                    styx_log("[tut] skip pending (TutorialManager class not ready)");
+                    wait_log++;
+                }
+            }
+        }
 
         ImGui::Render();
 

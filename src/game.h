@@ -45,6 +45,14 @@ void styx_game_screen_size(int *w, int *h);
 // Call the game's own guest-account reset (MSDKLogin.ResetGuest()). Main thread.
 void styx_game_reset_guest(void);
 
+// Skip the guest tutorial by writing TutorialManager's static flags directly
+// (data-only: SkipTutorialFromAppLauncher=1, m_TutorialEnable/m_PrologueEnable/
+// m_TutorialFinalEnable/m_BRTutorialEnable=0). Forces TutorialManager's class init
+// first so its class-pointer global is populated. Returns true once the write
+// landed (false while the class is not initialised yet — call again to retry).
+// Main thread only (calls an il2cpp method).
+bool styx_game_skip_tutorial(void);
+
 #ifdef __cplusplus
 }
 #endif
