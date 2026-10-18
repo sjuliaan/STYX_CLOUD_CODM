@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 
 static volatile int g_feat[STYX_FEAT_COUNT];
-static volatile float g_assist_strength = 50.0f;   // 0..100 absolute aim speed
+static volatile int g_assist_strength = 50;        // 0..100 absolute aim speed
 static char g_cfg_path[512];
 
 static const char *k_keys[STYX_FEAT_COUNT] = {
@@ -41,14 +41,14 @@ void styx_feat_toggle(styx_feature f) {
     __atomic_store_n(&g_feat[f], cur ? 0 : 1, __ATOMIC_RELAXED);
 }
 
-static float styx_clamp_strength(float v) {
+static int styx_clamp_strength(float v) {
     if (!(v > 0.0f)) v = 0.0f;      // also catches NaN
     if (v > 100.0f) v = 100.0f;
-    return v;
+    return (int)(v + 0.5f);
 }
 
 float styx_assist_strength(void) {
-    return __atomic_load_n(&g_assist_strength, __ATOMIC_RELAXED);
+    return (float)__atomic_load_n(&g_assist_strength, __ATOMIC_RELAXED);
 }
 
 void styx_assist_strength_set(float v) {
@@ -68,7 +68,7 @@ static void styx_cfg_path_build(void) {
 void styx_cfg_init(void) {
     // Defaults: everything off, aim strength 50.
     for (int i = 0; i < STYX_FEAT_COUNT; i++) __atomic_store_n(&g_feat[i], 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_assist_strength, 50.0f, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_assist_strength, 50, __ATOMIC_RELAXED);
 
     styx_cfg_path_build();
 
@@ -112,7 +112,6 @@ void styx_cfg_save(void) {
     if (!fp) { styx_log("[cfg] save FAILED (%s)", g_cfg_path); return; }
     for (int i = 0; i < STYX_FEAT_COUNT; i++)
         fprintf(fp, "%s=%d\n", k_keys[i], styx_feat((styx_feature)i) ? 1 : 0);
-    fprintf(fp, "assist_strength=%d\n", (int)(styx_assist_strength() + 0.5f));
-    fclose(fp);
+    fprintf(fp, "assist_strength=%d\n", (int)(styx_assist_strength() + 0.5f));    fclose(fp);
     styx_log("[cfg] saved to %s", g_cfg_path);
 }
