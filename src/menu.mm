@@ -2,6 +2,7 @@
 #include "config.h"
 #include "esp.h"
 #include "game.h"
+#include "guest.h"
 #include "styxlog.h"
 
 #include "imgui.h"
@@ -198,7 +199,11 @@ void styx_menu_draw(void) {
     if (g_pendingResetGuest) {
         g_pendingResetGuest = 0;
         dispatch_async(dispatch_get_main_queue(), ^{
+            // Best-effort native reset first, then scrub the persisted MSDK
+            // state (Keychain + defaults + itop_login.txt) and force-quit so
+            // the next launch creates a fresh guest. Never returns.
             styx_game_reset_guest();
+            styx_reset_guest_account();
         });
     }
 }

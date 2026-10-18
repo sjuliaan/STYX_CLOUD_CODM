@@ -4,11 +4,12 @@
 extern "C" {
 #endif
 
-// Install the log-only ACE detection probe.
-// Rebinds the libc/mach/dyld imports of the COD Mobile anti-cheat frameworks
-// (anogs, kgvmp_dy, enq_transceiver_dy, TDataMaster, CrashSight) to logging
-// shims. Nothing is hidden in this build: every shim forwards to the real
-// function after recording the call to Documents/styx_ace.log.
+// Install the ACE detection bypass (v3, rival parity).
+// Globally rebinds (fishhook) the dyld/mach/libc/socket/Security symbols the
+// anti-cheat uses, neutralises the AnoSDK command channel (AnoSDKIoctl), hides
+// our own image from dyld enumeration, spoofs code-sign/entitlement checks, and
+// rewrites anti-cheat network packets. Every call is recorded to
+// Documents/styx_ace.log; `[rebind] originals resolved: N / M` confirms coverage.
 void styx_stealth_start(void);
 
 #ifdef __cplusplus

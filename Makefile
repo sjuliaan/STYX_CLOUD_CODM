@@ -19,7 +19,7 @@ styx_CCFLAGS := -std=c++17 -fno-exceptions -fno-rtti -O2 -DNDEBUG -I$(IMGUI) -I$
 styx_CCFLAGS += -Wno-unused-variable -Wno-unused-but-set-variable
 
 styx_LDFLAGS := -install_name @executable_path/Frameworks/libstyx.dylib
-styx_FRAMEWORKS := Foundation UIKit CoreGraphics QuartzCore Metal MetalKit
+styx_FRAMEWORKS := Foundation UIKit CoreGraphics QuartzCore Metal MetalKit Security
 styx_INSTALL_PATH := /Library/MobileSubstrate/DynamicLibraries
 
 include $(THEOS_MAKE_PATH)/library.mk
