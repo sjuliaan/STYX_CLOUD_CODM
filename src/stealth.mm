@@ -1,28 +1,33 @@
-// stealth.mm — ACE detection bypass (v3, rival parity).
+// stealth.mm — ACE detection bypass (v4, full rival parity).
 //
-// Recon of the rival dylib (Cloud_CODM 1.6.57) showed its anti-cheat bypass is a
-// *global* fishhook `rebind_symbols` install (its InitFunc_6 / InitFunc_0) plus an
-// NSBundle metadata spoof. It rebinds, in every image, the exact symbols below and
-// neutralises the AnoSDK command channel. We now match that:
+// Recon of the rival dylib (Cloud_CODM 1.6.57) gave its complete stealth stack;
+// this now matches it behaviour-for-behaviour:
 //
-//   AnoSDKIoctl                 -> return 0 for a fixed command set; spoof the
-//                                  version query (cmd 14) with "7.7.58.42114"
-//   dyld image enumeration      -> hide our own image (count/name/header/slide/dladdr)
-//   getsegbyname/getsegmentdata -> log only (we do NOT patch the main cryptid, so
-//                                  masking __LINKEDIT buys us nothing)
-//   SecCode/SecStaticCodeCheck  -> return 0 (valid)
-//   SecCertificateCopySubject   -> spoof "Apple Distribution: Activision ..."
-//   SecTaskCopyValueForEntitle  -> spoof application-identifier / team-id / get-task-allow
-//   sysctl / sysctlbyname       -> scrub P_TRACED, zero the {KERN,14} probe
-//   ptrace                      -> PT_DENY_ATTACH (31) returns 0
-//   csops / csops_audittoken    -> passthrough (inert parity)
-//   send / recv                 -> rewrite anti-cheat packets ("01 00 09" -> "00 00 09")
-//   NSBundle methods            -> spoof bundle id / signing identity (swizzled)
+//   dyld enumeration     -> hide our own image (count/name/header/slide); our
+//                           slot is skipped by index remap
+//   dladdr               -> present a DECOY system path (not NULL) for our image
+//   main-binary cryptid  -> patch LC_ENCRYPTION_INFO_64 (cryptsize=0x1000,
+//                           cryptid=1) so an in-memory integrity read looks
+//                           like an untouched App-Store binary
+//   getsegbyname         -> return a FAKED __LINKEDIT segment (vmsize/filesize
+//   getsegmentdata          = 0x86CE50), matching the rival's constants
+//   AnoSDKIoctl          -> return 0 for a fixed command set; spoof the
+//                           version query (cmd 14) with "7.7.58.42114"
+//   SecCode/SecStaticCode-> return 0 (valid)
+//   SecCertificateCopy   -> spoof "Apple Distribution: Activision ..."
+//   SecTaskCopyValue     -> spoof application-identifier / team-id / get-task-allow
+//   sysctl / sysctlbyname-> scrub P_TRACED, zero the {KERN,14} probe
+//   ptrace               -> PT_DENY_ATTACH (31) returns 0
+//   csops / csops_audit  -> passthrough (inert parity)
+//   send / recv          -> rewrite anti-cheat packets ("01 00 09" -> "00 00 09")
+//   NSBundle methods     -> spoof bundle id / signing identity (swizzled)
+//
+// Hook surface is trimmed to the rival's exact set (no task_info / file-op hooks).
 //
 // fishhook compares `&symbol_name[1]` (i.e. the name with the binary's leading
 // underscore stripped) to the rebind name, so names here must NOT start with '_'.
 //
-// NOTE: nslog-style `[rebind] originals resolved: N / M` in styx_ace.log confirms
+// NOTE: `[rebind] originals resolved: N / M` in GPMGameCore.probe confirms
 // which symbols actually resolved.
 
 #include "stealth.h"
@@ -35,40 +40,21 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <errno.h>
-#include <dirent.h>
 #include <dlfcn.h>
-#include <sys/stat.h>
-#include <sys/mount.h>
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #include <sys/proc.h>
 #include <sys/socket.h>
 #include <mach/mach.h>
+#include <mach/vm_map.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
 #import <objc/runtime.h>
 
 #include "fishhook.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-// Declarations not always shipped in the iOS SDK.
-extern int proc_regionfilename(int pid, uint64_t address, void *buffer, uint32_t buffersize);
-extern kern_return_t mach_vm_region_recurse(vm_map_t target_task,
-                                            mach_vm_address_t *address,
-                                            mach_vm_size_t *size,
-                                            natural_t *nesting_depth,
-                                            void *info,
-                                            mach_msg_type_number_t *info_cnt);
-
-#ifdef __cplusplus
-}
-#endif
 
 // ---------------------------------------------------------------------------
 // Probe log (raw fd + write(); never goes through a rebindable symbol).
@@ -83,7 +69,7 @@ static void probe_open(void) {
     @autoreleasepool {
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *dir  = paths.count ? paths[0] : NSTemporaryDirectory();
-        NSString *path = [dir stringByAppendingPathComponent:@"styx_ace.log"];
+        NSString *path = [dir stringByAppendingPathComponent:@"GPMGameCore.probe"];
         g_fd = open(path.UTF8String, O_WRONLY | O_CREAT | O_APPEND, 0644);
     }
 }
@@ -102,42 +88,6 @@ static void probe_printf(const char *fmt, ...) {
     (void)ignored;
 }
 
-static const char *istrstr(const char *hay, const char *needle) {
-    if (!hay || !needle) return NULL;
-    size_t nl = strlen(needle);
-    if (!nl) return hay;
-    for (const char *p = hay; *p; ++p) {
-        size_t i = 0;
-        while (i < nl && p[i] &&
-               (char)((p[i] >= 'A' && p[i] <= 'Z') ? p[i] + 32 : p[i]) ==
-               (char)((needle[i] >= 'A' && needle[i] <= 'Z') ? needle[i] + 32 : needle[i]))
-            ++i;
-        if (i == nl) return p;
-    }
-    return NULL;
-}
-
-// Paths the ACE touches that are worth recording.
-static int path_interesting(const char *p) {
-    static const char *keys[] = {
-        "styx", "codm", ".app/", "payload", "mobileprovision", "codesignature",
-        "_codedirectory", "sc_info", "substrate", "cydia", "frida", "bulldozer",
-        "/var/", "/etc/", "/bin/", "/usr/", "/applications", "password", "libhooker",
-        "ellekit", "shadow", NULL
-    };
-    if (!p) return 0;
-    for (int i = 0; keys[i]; ++i)
-        if (istrstr(p, keys[i])) return 1;
-    return 0;
-}
-
-// Our own probe/log files must never be filtered — the global rebind means our
-// own open()/fopen() calls go through these shims too.
-static int path_is_our_log(const char *p) {
-    if (!p) return 0;
-    return istrstr(p, "styx.log") || istrstr(p, "styx_ace.log");
-}
-
 // ---------------------------------------------------------------------------
 // Originals (filled in by fishhook's `replaced` out-param).
 // ---------------------------------------------------------------------------
@@ -150,26 +100,9 @@ static int                  (*orig_dladdr)(const void *, Dl_info *)            =
 
 static int  (*orig_sysctl)(int *, u_int, void *, size_t *, void *, size_t)     = NULL;
 static int  (*orig_sysctlbyname)(const char *, void *, size_t *, void *, size_t) = NULL;
-static pid_t (*orig_getpid)(void)                                              = NULL;
-static pid_t (*orig_getppid)(void)                                             = NULL;
-static kern_return_t (*orig_task_info)(task_t, task_flavor_t, task_info_t, mach_msg_type_number_t *) = NULL;
-static kern_return_t (*orig_task_get_special_port)(task_t, int, mach_port_t *) = NULL;
-
-static int  (*orig_proc_regionfilename)(int, uint64_t, void *, uint32_t)      = NULL;
-static kern_return_t (*orig_mach_vm_region_recurse)(vm_map_t, mach_vm_address_t *, mach_vm_size_t *, natural_t *, void *, mach_msg_type_number_t *) = NULL;
-
-static int  (*orig_stat)(const char *, struct stat *)                          = NULL;
-static int  (*orig_lstat)(const char *, struct stat *)                         = NULL;
-static int  (*orig_access)(const char *, int)                                  = NULL;
-static int  (*orig_open)(const char *, int, ...)                               = NULL;
-static FILE *(*orig_fopen)(const char *, const char *)                         = NULL;
-static DIR *(*orig_opendir)(const char *)                                      = NULL;
-static int  (*orig_statfs)(const char *, struct statfs *)                      = NULL;
-
 static char *(*orig_getenv)(const char *)                                      = NULL;
 
-// Rival-parity additions.
-static int  (*orig_AnoSDKIoctl)(int, void *, void *, size_t)                  = NULL;
+static int  (*orig_AnoSDKIoctl)(int, void *, void *, size_t)                   = NULL;
 static long (*orig_ptrace)(int, int, void *, int)                              = NULL;
 static const void *(*orig_getsegbyname)(const char *)                          = NULL;
 static void *(*orig_getsegmentdata)(const void *, const char *, size_t *)      = NULL;
@@ -186,19 +119,15 @@ static ssize_t (*orig_recv)(int, void *, size_t, int)                          =
 // Shims. Every shim: if unarmed / re-entrant -> straight through to real.
 // ---------------------------------------------------------------------------
 
-static uint32_t g_c_dyld = 0, g_c_sys = 0, g_c_file = 0, g_c_task = 0,
-                g_c_region = 0, g_c_env = 0, g_c_ace = 0, g_c_net = 0;
+static uint32_t g_c_dyld = 0, g_c_sys = 0, g_c_env = 0, g_c_ace = 0, g_c_net = 0;
 #define CAP_DYLD   600u
 #define CAP_SYS    400u
-#define CAP_FILE   300u
-#define CAP_TASK   120u
-#define CAP_REGION 200u
 #define CAP_ENV    200u
 #define CAP_ACE    200u
 #define CAP_NET    200u
 
 // Our own image, so the ACE cannot enumerate us via dyld or dladdr.
-static int   g_our_index  = -1;      // _dyld index of libstyx.dylib
+static int   g_our_index  = -1;      // _dyld index of our framework dylib
 static void *g_our_header = NULL;    // its mach_header
 
 // Remap a caller-supplied dyld index so our image is invisible (the reported
@@ -206,18 +135,6 @@ static void *g_our_header = NULL;    // its mach_header
 static inline uint32_t styx_dyld_remap(uint32_t idx) {
     if (g_our_index >= 0 && idx >= (uint32_t)g_our_index) return idx + 1;
     return idx;
-}
-
-// Paths whose access the ACE must not observe.
-static int path_denied(const char *p) {
-    static const char *keys[] = {
-        "styx", "frida", "substrate", "libhooker", "ellekit", "cydia",
-        "sileo", "odyssey", "trollstore", "dnssd", NULL
-    };
-    if (!p) return 0;
-    for (int i = 0; keys[i]; ++i)
-        if (istrstr(p, keys[i])) return 1;
-    return 0;
 }
 
 static uint32_t shim_dyld_image_count(void) {
@@ -260,14 +177,20 @@ static intptr_t shim_dyld_get_image_vmaddr_slide(uint32_t idx) {
     return s;
 }
 
+// Decoy path the rival feeds dladdr for its own image (recovered from its
+// obfuscated constant). Keeps a valid code address resolvable to a plausible
+// system dylib instead of returning NULL.
+static const char *const k_decoy_path = "/usr/lib/system/libsystem_c.dylib";
+
 static int shim_dladdr(const void *addr, Dl_info *info) {
     if (!g_armed || tls_hook) return orig_dladdr(addr, info);
     tls_hook = 1;
     int r = orig_dladdr(addr, info);
     if (r && info && g_our_header && info->dli_fbase == g_our_header) {
-        memset(info, 0, sizeof(*info));
-        r = 0;
-        if (g_c_dyld++ < CAP_DYLD) probe_printf("[dladdr     ] HID our image for %p", addr);
+        info->dli_fname = k_decoy_path;   // decoy (not NULL) — rival parity
+        info->dli_sname = NULL;
+        info->dli_saddr = NULL;
+        if (g_c_dyld++ < CAP_DYLD) probe_printf("[dladdr     ] decoy path for %p", addr);
     }
     tls_hook = 0;
     return r;
@@ -308,148 +231,12 @@ static int shim_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
 static int shim_sysctlbyname(const char *n, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     if (!g_armed || tls_hook) return orig_sysctlbyname(n, oldp, oldlenp, newp, newlen);
     tls_hook = 1;
-    int flag = n && (istrstr(n, "kern.proc") || istrstr(n, "kern.argmax") ||
-                     istrstr(n, "hw.machine") || istrstr(n, "model"));
+    int flag = n && (strstr(n, "kern.proc") || strstr(n, "kern.argmax") ||
+                     strstr(n, "hw.machine") || strstr(n, "model"));
     if (g_c_sys++ < CAP_SYS)
         probe_printf("[sysctlbynm ] %s%s", n ? n : "(null)",
                      flag ? "   <<< model / proc query" : "");
     int r = orig_sysctlbyname(n, oldp, oldlenp, newp, newlen);
-    tls_hook = 0;
-    return r;
-}
-
-static pid_t shim_getpid(void) {
-    if (!g_armed || tls_hook) return orig_getpid();
-    tls_hook = 1;
-    static int once = 0;
-    if (!once++) probe_printf("[getpid     ] called (used for sysctl(KERN_PROC) debugger probe)");
-    tls_hook = 0;
-    return orig_getpid();
-}
-
-static pid_t shim_getppid(void) {
-    if (!g_armed || tls_hook) return orig_getppid();
-    tls_hook = 1;
-    static int once = 0;
-    if (!once++) probe_printf("[getppid    ] called (parent-process probe)");
-    tls_hook = 0;
-    return orig_getppid();
-}
-
-static kern_return_t shim_task_info(task_t t, task_flavor_t f, task_info_t o, mach_msg_type_number_t *c) {
-    if (!g_armed || tls_hook) return orig_task_info(t, f, o, c);
-    tls_hook = 1;
-    if (g_c_task++ < CAP_TASK)
-        probe_printf("[task_info  ] flavor=%d (5=TASK_DYLD_INFO)%s", f,
-                     f == 5 ? "   <<< TASK_DYLD_INFO" : "");
-    kern_return_t r = orig_task_info(t, f, o, c);
-    tls_hook = 0;
-    return r;
-}
-
-static kern_return_t shim_task_get_special_port(task_t t, int which, mach_port_t *p) {
-    if (!g_armed || tls_hook) return orig_task_get_special_port(t, which, p);
-    tls_hook = 1;
-    if (g_c_task++ < CAP_TASK)
-        probe_printf("[task_port  ] which=%d", which);
-    kern_return_t r = orig_task_get_special_port(t, which, p);
-    tls_hook = 0;
-    return r;
-}
-
-static int shim_proc_regionfilename(int pid, uint64_t addr, void *buf, uint32_t sz) {
-    if (!g_armed || tls_hook) return orig_proc_regionfilename(pid, addr, buf, sz);
-    tls_hook = 1;
-    int r = orig_proc_regionfilename(pid, addr, buf, sz);
-    if (g_c_region++ < CAP_REGION)
-        probe_printf("[region.fn  ] pid=%d addr=0x%llx -> %d%s", pid, (unsigned long long)addr, r,
-                     r < 1 ? "   <<< ANONYMOUS REGION (no file)" : "");
-    tls_hook = 0;
-    return r;
-}
-
-static kern_return_t shim_mach_vm_region_recurse(vm_map_t t, mach_vm_address_t *a, mach_vm_size_t *s,
-                                                 natural_t *d, void *i, mach_msg_type_number_t *c) {
-    if (!g_armed || tls_hook) return orig_mach_vm_region_recurse(t, a, s, d, i, c);
-    tls_hook = 1;
-    kern_return_t r = orig_mach_vm_region_recurse(t, a, s, d, i, c);
-    if (g_c_region++ < CAP_REGION)
-        probe_printf("[vm.region  ] addr=0x%llx size=0x%llx r=%d", (unsigned long long)(a ? *a : 0),
-                     (unsigned long long)(s ? *s : 0), r);
-    tls_hook = 0;
-    return r;
-}
-
-static int shim_stat(const char *p, struct stat *b) {
-    if (!g_armed || tls_hook) return orig_stat(p, b);
-    tls_hook = 1;
-    if (!path_is_our_log(p) && path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[stat       ] DENY %s", p); tls_hook = 0; errno = ENOENT; return -1; }
-    if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[stat       ] %s", p ? p : "(null)");
-    int r = orig_stat(p, b);
-    tls_hook = 0;
-    return r;
-}
-
-static int shim_lstat(const char *p, struct stat *b) {
-    if (!g_armed || tls_hook) return orig_lstat(p, b);
-    tls_hook = 1;
-    if (!path_is_our_log(p) && path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[lstat      ] DENY %s", p); tls_hook = 0; errno = ENOENT; return -1; }
-    if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[lstat      ] %s", p ? p : "(null)");
-    int r = orig_lstat(p, b);
-    tls_hook = 0;
-    return r;
-}
-
-static int shim_access(const char *p, int m) {
-    if (!g_armed || tls_hook) return orig_access(p, m);
-    tls_hook = 1;
-    if (!path_is_our_log(p) && path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[access     ] DENY %s", p); tls_hook = 0; errno = ENOENT; return -1; }
-    if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[access     ] %s mode=%d", p ? p : "(null)", m);
-    int r = orig_access(p, m);
-    tls_hook = 0;
-    return r;
-}
-
-static int shim_open(const char *p, int flags, ...) {
-    mode_t mode = 0;
-    if (flags & O_CREAT) {
-        va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap);
-    }
-    if (!g_armed || tls_hook) return orig_open(p, flags, mode);
-    tls_hook = 1;
-    if (!path_is_our_log(p) && path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[open       ] DENY %s", p); tls_hook = 0; errno = ENOENT; return -1; }
-    if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[open       ] %s flags=0x%x", p ? p : "(null)", flags);
-    int r = orig_open(p, flags, mode);
-    tls_hook = 0;
-    return r;
-}
-
-static FILE *shim_fopen(const char *p, const char *m) {
-    if (!g_armed || tls_hook) return orig_fopen(p, m);
-    tls_hook = 1;
-    if (!path_is_our_log(p) && path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[fopen      ] DENY %s", p); tls_hook = 0; errno = ENOENT; return NULL; }
-    if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[fopen      ] %s mode=%s", p ? p : "(null)", m ? m : "(null)");
-    FILE *r = orig_fopen(p, m);
-    tls_hook = 0;
-    return r;
-}
-
-static DIR *shim_opendir(const char *p) {
-    if (!g_armed || tls_hook) return orig_opendir(p);
-    tls_hook = 1;
-    if (!path_is_our_log(p) && path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[opendir    ] DENY %s", p); tls_hook = 0; errno = ENOENT; return NULL; }
-    if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[opendir    ] %s", p ? p : "(null)");
-    DIR *r = orig_opendir(p);
-    tls_hook = 0;
-    return r;
-}
-
-static int shim_statfs(const char *p, struct statfs *b) {
-    if (!g_armed || tls_hook) return orig_statfs(p, b);
-    tls_hook = 1;
-    if (!path_is_our_log(p) && path_denied(p)) { if (g_c_file++ < CAP_FILE) probe_printf("[statfs     ] DENY %s", p); tls_hook = 0; errno = ENOENT; return -1; }
-    if (path_interesting(p) && g_c_file++ < CAP_FILE) probe_printf("[statfs     ] %s", p ? p : "(null)");
-    int r = orig_statfs(p, b);
     tls_hook = 0;
     return r;
 }
@@ -496,15 +283,90 @@ static long shim_ptrace(int req, int pid, void *addr, int data) {
     return orig_ptrace ? orig_ptrace(req, pid, addr, data) : -1;
 }
 
+// --- faked __LINKEDIT + main-binary cryptid (rival parity) -----------------
+
+#define STYX_LINKEDIT_FAKE_SIZE 0x86CE50ULL   // rival's constant (8834640)
+
+static struct segment_command_64 g_fake_linkedit;
+static int g_have_fake_linkedit = 0;
+
+// Cache image 0's real __LINKEDIT command and override vmsize/filesize, exactly
+// like the rival does, so getsegbyname()/getsegmentdata() report a benign size.
+static void styx_cache_linkedit(void) {
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(0);
+    if (!mh || mh->magic != MH_MAGIC_64) return;
+    const uint8_t *p = (const uint8_t *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)p;
+            if (strncmp(seg->segname, "__LINKEDIT", 10) == 0) {
+                g_fake_linkedit = *seg;
+                g_fake_linkedit.vmsize   = STYX_LINKEDIT_FAKE_SIZE;
+                g_fake_linkedit.filesize = STYX_LINKEDIT_FAKE_SIZE;
+                g_have_fake_linkedit = 1;
+                probe_printf("[linkedit   ] cached __LINKEDIT (vmsize/filesize -> 0x%llx)",
+                             (unsigned long long)STYX_LINKEDIT_FAKE_SIZE);
+                return;
+            }
+        }
+        if (lc->cmdsize == 0) break;
+        p += lc->cmdsize;
+    }
+}
+
+// Patch image 0's LC_ENCRYPTION_INFO_64 in place (VM_COPY so the private copy is
+// writable, exactly the rival's primitive): cryptsize = 0x1000, cryptid = 1.
+static void styx_patch_cryptid(void) {
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(0);
+    if (!mh || mh->magic != MH_MAGIC_64) return;
+    const uint8_t *p = (const uint8_t *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_ENCRYPTION_INFO_64) {
+            struct encryption_info_command_64 *ei = (struct encryption_info_command_64 *)p;
+            if (ei->cryptid == 1 && ei->cryptsize == 0x1000) {
+                probe_printf("[cryptid    ] already cryptid=1/cryptsize=0x1000");
+                return;
+            }
+            long ps = getpagesize();
+            vm_address_t page = (vm_address_t)ei & ~((vm_address_t)ps - 1);
+            vm_size_t span = (vm_size_t)(((uint8_t *)ei + sizeof(*ei)) - (uint8_t *)page);
+            kern_return_t kr = vm_protect(mach_task_self(), page, span, 0,
+                                          VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+            if (kr == KERN_SUCCESS) {
+                ei->cryptsize = 0x1000;
+                ei->cryptid   = 1;
+                probe_printf("[cryptid    ] patched LC_ENCRYPTION_INFO_64 (cryptid -> 1)");
+            } else {
+                probe_printf("[cryptid    ] vm_protect failed kr=%d", (int)kr);
+            }
+            return;
+        }
+        if (lc->cmdsize == 0) break;
+        p += lc->cmdsize;
+    }
+}
+
 static const void *shim_getsegbyname(const char *segname) {
-    if (g_armed && !tls_hook && g_c_ace++ < CAP_ACE)
-        probe_printf("[getsegbynm ] %s", segname ? segname : "(null)");
+    if (g_armed && !tls_hook && g_have_fake_linkedit && segname &&
+        strcmp(segname, "__LINKEDIT") == 0) {
+        if (g_c_ace++ < CAP_ACE) probe_printf("[getsegbynm ] __LINKEDIT -> faked seg");
+        return &g_fake_linkedit;
+    }
     return orig_getsegbyname ? orig_getsegbyname(segname) : NULL;
 }
 
 static void *shim_getsegmentdata(const void *mhp, const char *segname, size_t *size) {
-    if (g_armed && !tls_hook && g_c_ace++ < CAP_ACE)
-        probe_printf("[getsegdata ] %s", segname ? segname : "(null)");
+    if (g_armed && !tls_hook && g_have_fake_linkedit && segname &&
+        strcmp(segname, "__LINKEDIT") == 0) {
+        void *r = orig_getsegmentdata ? orig_getsegmentdata(mhp, segname, size) : NULL;
+        if (size) *size = (size_t)STYX_LINKEDIT_FAKE_SIZE;
+        if (g_c_ace++ < CAP_ACE)
+            probe_printf("[getsegdata ] __LINKEDIT -> size 0x%llx",
+                         (unsigned long long)STYX_LINKEDIT_FAKE_SIZE);
+        return r;
+    }
     return orig_getsegmentdata ? orig_getsegmentdata(mhp, segname, size) : NULL;
 }
 
@@ -618,7 +480,7 @@ static ssize_t shim_recv(int s, void *buf, size_t len, int flags) {
 }
 
 // ---------------------------------------------------------------------------
-// Rebinding
+// Rebinding (trimmed to the rival's exact symbol set).
 // ---------------------------------------------------------------------------
 
 static struct rebinding g_rebinds[] = {
@@ -629,21 +491,7 @@ static struct rebinding g_rebinds[] = {
     { "dladdr",                       (void *)shim_dladdr,                      (void **)&orig_dladdr },
     { "sysctl",                       (void *)shim_sysctl,                     (void **)&orig_sysctl },
     { "sysctlbyname",                 (void *)shim_sysctlbyname,               (void **)&orig_sysctlbyname },
-    { "getpid",                       (void *)shim_getpid,                     (void **)&orig_getpid },
-    { "getppid",                      (void *)shim_getppid,                    (void **)&orig_getppid },
-    { "task_info",                    (void *)shim_task_info,                  (void **)&orig_task_info },
-    { "task_get_special_port",        (void *)shim_task_get_special_port,      (void **)&orig_task_get_special_port },
-    { "proc_regionfilename",          (void *)shim_proc_regionfilename,        (void **)&orig_proc_regionfilename },
-    { "mach_vm_region_recurse",       (void *)shim_mach_vm_region_recurse,     (void **)&orig_mach_vm_region_recurse },
-    { "stat",                         (void *)shim_stat,                       (void **)&orig_stat },
-    { "lstat",                        (void *)shim_lstat,                      (void **)&orig_lstat },
-    { "access",                       (void *)shim_access,                     (void **)&orig_access },
-    { "open",                         (void *)shim_open,                       (void **)&orig_open },
-    { "fopen",                        (void *)shim_fopen,                      (void **)&orig_fopen },
-    { "opendir",                      (void *)shim_opendir,                    (void **)&orig_opendir },
-    { "statfs",                       (void *)shim_statfs,                     (void **)&orig_statfs },
     { "getenv",                       (void *)shim_getenv,                     (void **)&orig_getenv },
-    // Rival-parity additions.
     { "AnoSDKIoctl",                  (void *)shim_AnoSDKIoctl,                (void **)&orig_AnoSDKIoctl },
     { "ptrace",                       (void *)shim_ptrace,                     (void **)&orig_ptrace },
     { "getsegbyname",                 (void *)shim_getsegbyname,               (void **)&orig_getsegbyname },
@@ -723,6 +571,11 @@ static void rebind_all(void) {
     for (size_t i = 0; i < N_REBINDS; ++i)
         if (g_rebinds[i].replaced && *g_rebinds[i].replaced) ++resolved;
     probe_printf("[rebind     ] originals resolved: %d / %zu", resolved, N_REBINDS);
+
+    // Per-name resolution, so a silently-missing symbol is obvious in the log.
+    for (size_t i = 0; i < N_REBINDS; ++i)
+        if (!(g_rebinds[i].replaced && *g_rebinds[i].replaced))
+            probe_printf("[rebind     ]   MISS %s", g_rebinds[i].name);
 }
 
 void styx_stealth_start(void) {
@@ -731,9 +584,10 @@ void styx_stealth_start(void) {
     started = 1;
 
     probe_open();
-    probe_printf("================ STYX ACE BYPASS (v3, rival parity) ================");
+    probe_printf("================ STYX ACE BYPASS (v4, rival parity) ================");
 
-    // Locate our own image so the ACE cannot enumerate us.
+    // Locate our own image so the ACE cannot enumerate us. Done before arming,
+    // so dladdr/_dyld_* are still the real ones.
     {
         Dl_info info;
         if (dladdr((void *)&styx_stealth_start, &info) != 0) {
@@ -745,6 +599,11 @@ void styx_stealth_start(void) {
         }
         probe_printf("[self       ] header=%p dyld_idx=%d", g_our_header, g_our_index);
     }
+
+    // Integrity parity: patch the main binary's encryption info + cache a faked
+    // __LINKEDIT before any of the anti-cheat's own code runs.
+    styx_patch_cryptid();
+    styx_cache_linkedit();
 
     // Global rebind (installs the shims in every image + an add-image callback
     // for late loads). Our shims only act once g_armed is set below.

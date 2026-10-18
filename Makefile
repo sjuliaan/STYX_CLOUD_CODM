@@ -18,7 +18,7 @@ styx_CFLAGS += -Wno-unused-variable -Wno-unused-but-set-variable
 styx_CCFLAGS := -std=c++17 -fno-exceptions -fno-rtti -O2 -DNDEBUG -I$(IMGUI) -I$(IMGUI)/backends
 styx_CCFLAGS += -Wno-unused-variable -Wno-unused-but-set-variable
 
-styx_LDFLAGS := -install_name @executable_path/Frameworks/libstyx.dylib
+styx_LDFLAGS := -install_name @executable_path/Frameworks/GPMGameCore.framework/GPMGameCore
 styx_FRAMEWORKS := Foundation UIKit CoreGraphics QuartzCore Metal MetalKit Security
 styx_INSTALL_PATH := /Library/MobileSubstrate/DynamicLibraries
 

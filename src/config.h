@@ -8,7 +8,7 @@ extern "C" {
 // ---------------------------------------------------------------------------
 // Runtime feature flags. Every feature defaults to OFF; the menu toggles them
 // live (the hooks read these atomics on every call) and the state is persisted
-// to Documents/styx.cfg so it survives a relaunch.
+// to Documents/GPMGameCore.cfg so it survives a relaunch.
 // ---------------------------------------------------------------------------
 
 typedef enum {
@@ -22,10 +22,10 @@ typedef enum {
     STYX_FEAT_COUNT
 } styx_feature;
 
-// Load Documents/styx.cfg (missing entries stay at their default = off).
+// Load Documents/GPMGameCore.cfg (missing entries stay at their default = off).
 void styx_cfg_init(void);
 
-// Persist the current flags to Documents/styx.cfg.
+// Persist the current flags to Documents/GPMGameCore.cfg.
 void styx_cfg_save(void);
 
 bool styx_feat(styx_feature f);
@@ -34,11 +34,11 @@ void styx_feat_toggle(styx_feature f);
 
 // Aim-assist strength, 0..100, returned verbatim by the aim-assist hook while
 // STYX_FEAT_ASSIST is on (absolute override, matching the Android mod). Persisted
-// in styx.cfg as `assist_strength=NN`. Default 50.
+// in GPMGameCore.cfg as `assist_strength=NN`. Default 50.
 float styx_assist_strength(void);
 void  styx_assist_strength_set(float v);
 
-// Stable key used in styx.cfg (e.g. "esp").
+// Stable key used in GPMGameCore.cfg (e.g. "esp").
 const char *styx_feat_key(styx_feature f);
 // Human label shown in the menu (e.g. "ESP").
 const char *styx_feat_label(styx_feature f);

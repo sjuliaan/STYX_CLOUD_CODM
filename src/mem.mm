@@ -43,7 +43,7 @@ static inline kern_return_t styx_protect(uintptr_t start, size_t len,
                       set_maximum ? TRUE : FALSE, (vm_prot_t)prot);
 }
 
-// Our own Mach-O header (libstyx.dylib). Never patch the image we run from.
+// Our own Mach-O header (our framework dylib). Never patch the image we run from.
 static void *styx_own_header(void) {
     Dl_info info;
     if (dladdr((void *)&styx_own_header, &info) != 0) return info.dli_fbase;

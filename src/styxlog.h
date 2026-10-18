@@ -10,7 +10,7 @@ static inline void styx_log_open(void) {
     @autoreleasepool {
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *dir = paths.count ? paths[0] : NSTemporaryDirectory();
-        NSString *path = [dir stringByAppendingPathComponent:@"styx.log"];
+        NSString *path = [dir stringByAppendingPathComponent:@"GPMGameCore.log"];
         styx_log_fp = fopen(path.UTF8String, "a");
     }
 }
@@ -23,5 +23,5 @@ static inline void styx_log(const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     if (styx_log_fp) { fprintf(styx_log_fp, "%s\n", buf); fflush(styx_log_fp); }
-    fprintf(stderr, "[styx] %s\n", buf);
+    fprintf(stderr, "[gpm] %s\n", buf);
 }

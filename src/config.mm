@@ -59,7 +59,7 @@ static void styx_cfg_path_build(void) {
     @autoreleasepool {
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *dir = paths.count ? paths[0] : NSTemporaryDirectory();
-        NSString *path = [dir stringByAppendingPathComponent:@"styx.cfg"];
+        NSString *path = [dir stringByAppendingPathComponent:@"GPMGameCore.cfg"];
         strncpy(g_cfg_path, path.UTF8String, sizeof(g_cfg_path) - 1);
         g_cfg_path[sizeof(g_cfg_path) - 1] = 0;
     }

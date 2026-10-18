@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Inject libstyx into a decrypted CODM IPA (no jailbreak) WITHOUT touching the
-main executable.
+Inject the GPMGameCore dylib into a decrypted CODM IPA (no jailbreak) WITHOUT
+touching the main executable.
 
 Technique (mirrors the reference mod exactly):
 
@@ -10,19 +10,19 @@ Technique (mirrors the reference mod exactly):
     load command into codm renumbers every ordinal >= the insertion point and
     makes dyld abort at launch ("Symbol not found: _sqlite3_bind_blob"). So we
     NEVER modify codm.
-  * Instead we APPEND `@rpath/libstyx.framework/libstyx` as the LAST
+  * Instead we APPEND `@rpath/GPMGameCore.framework/GPMGameCore` as the LAST
     dependency of the existing framework
         Frameworks/APMDeviceInfoSupport_dylib.framework/APMDeviceInfoSupport_dylib
     (codm ordinal 40). Appending at the end shifts none of that host's own
     ordinals, and codm is left byte-identical.
   * The dylib is shipped inside a `.framework` wrapper under
-    Frameworks/libstyx.framework/ and resolved via codm's existing
+    Frameworks/GPMGameCore.framework/ and resolved via codm's existing
     `@executable_path/Frameworks` rpath (so `@rpath/...` maps to it).
 
 Requires: pip install lief
 
 Usage:
-  python tools/inject.py -i "com.garena.game.codm.ipa" -d out/libstyx.dylib -o STYX_CODM.ipa
+  python tools/inject.py -i "com.garena.game.codm.ipa" -d out/GPMGameCore.dylib -o STYX_CODM.ipa
 """
 import argparse
 import hashlib
@@ -42,15 +42,15 @@ except ImportError:
 # Host framework that gets the extra dependency (codm ordinal 40).
 HOST_REL = "Frameworks/APMDeviceInfoSupport_dylib.framework/APMDeviceInfoSupport_dylib"
 # Our framework wrapper + the dependency path codm's @executable_path/Frameworks
-# rpath resolves to.
-FW_DIR = "Frameworks/libstyx.framework"
-FW_BIN = "libstyx"
-DEP_PATH = "@rpath/libstyx.framework/libstyx"
+# rpath resolves to. Named to blend with the game's own GPM*/APM* frameworks.
+FW_DIR = "Frameworks/GPMGameCore.framework"
+FW_BIN = "GPMGameCore"
+DEP_PATH = "@rpath/GPMGameCore.framework/GPMGameCore"
 
 FW_INFO = {
     "CFBundleDevelopmentRegion": "en",
     "CFBundleExecutable": FW_BIN,
-    "CFBundleIdentifier": "com.styx.libstyx",
+    "CFBundleIdentifier": "com.garena.gpm.gamecore",
     "CFBundleInfoDictionaryVersion": "6.0",
     "CFBundleName": FW_BIN,
     "CFBundlePackageType": "FMWK",
@@ -137,7 +137,7 @@ def verify(host, dep, before, after, codm, codm_md5):
 
 
 def enable_file_sharing(app_dir):
-    """Expose Documents/ in the Files app so styx.log can be pulled off-device."""
+    """Expose Documents/ in the Files app so the on-device log can be pulled off."""
     p = os.path.join(app_dir, "Info.plist")
     with open(p, "rb") as f:
         info = plistlib.load(f)
@@ -151,7 +151,7 @@ def enable_file_sharing(app_dir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-i", "--ipa", required=True, help="decrypted input IPA")
-    ap.add_argument("-d", "--dylib", required=True, help="built libstyx.dylib")
+    ap.add_argument("-d", "--dylib", required=True, help="built GPMGameCore.dylib")
     ap.add_argument("-o", "--out", required=True, help="output IPA path")
     ap.add_argument("--binary", default=None, help="executable name (default: app name)")
     args = ap.parse_args()
@@ -187,7 +187,7 @@ def main():
             shutil.rmtree(csig)
             print("[*] removed stale _CodeSignature from host framework")
 
-        # 3. Ship the dylib inside Frameworks/libstyx.framework/.
+        # 3. Ship the dylib inside Frameworks/GPMGameCore.framework/.
         fw = os.path.join(app, FW_DIR)
         os.makedirs(fw, exist_ok=True)
         shutil.copyfile(args.dylib, os.path.join(fw, FW_BIN))

@@ -27,7 +27,7 @@ bool styx_region_info(uintptr_t addr, styx_region *out);
 //     EXECUTE can no longer be restored; if we cannot prove we can put EXECUTE
 //     back we REFUSE the patch (never leave a live code page non-executable,
 //     which triggers a CODESIGNING "Invalid Page" SIGKILL on next fetch).
-// Refuses to patch libstyx's own image.
+// Refuses to patch our own image.
 bool styx_mem_write(void *address, const void *buffer, size_t len);
 
 // Convenience for patching *data* slots (function pointers, il2cpp method

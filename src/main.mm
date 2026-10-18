@@ -38,7 +38,7 @@ static void styx_init(void) {
         styx_log("base       : 0x%lx", (unsigned long)base);
         styx_log("slide      : 0x%lx", (unsigned long)styx_main_slide());
 
-        // Load persisted feature flags (all off unless styx.cfg says otherwise).
+        // Load persisted feature flags (all off unless GPMGameCore.cfg says otherwise).
         styx_cfg_init();
 
         uintptr_t matchGame = styx_addr(STYX_RVA_GamePlay_get_MatchGame);
