@@ -762,6 +762,12 @@ void styx_stealth_start(void) {
     swizzle_nsbundle();
 
     g_armed = 1;
+    {
+        // Prove the dyld hide is live at launch, before the ACE ever asks.
+        uint32_t realc = orig_dyld_image_count ? orig_dyld_image_count() : 0;
+        uint32_t seenc = _dyld_image_count();
+        probe_printf("[selftest  ] dyld count real=%u seen=%u (idx %d)", realc, seenc, g_our_index);
+    }
     probe_printf("[init       ] bypass armed. Filtering detection calls...");
     probe_printf("======================================================");
 
