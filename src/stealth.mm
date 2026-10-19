@@ -21,6 +21,9 @@
 //   csops / csops_audit  -> passthrough (inert parity)
 //   send / recv          -> rewrite anti-cheat packets ("01 00 09" -> "00 00 09")
 //   NSBundle methods     -> spoof bundle id / signing identity (swizzled)
+//   anogs eval memo      -> force (evaluated=1, reason=0) so the whole ACE
+//                           jailbreak/env detector suite reports "clean" forever
+//                           (data-only write to anogs __common; no code touched)
 //
 // Hook surface is trimmed to the rival's exact set (no task_info / file-op hooks).
 //
@@ -38,6 +41,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dlfcn.h>
@@ -49,6 +53,7 @@
 #include <mach/vm_map.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include <pthread.h>
 
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
@@ -370,6 +375,87 @@ static void *shim_getsegmentdata(const void *mhp, const char *segname, size_t *s
     return orig_getsegmentdata ? orig_getsegmentdata(mhp, segname, size) : NULL;
 }
 
+// --- anogs ACE detector memo-kill (data-only) ------------------------------
+//
+// The whole *readable* ACE jailbreak/env detector suite funnels through one
+// memoised predicate inside anogs:
+//
+//     sub_6F0C -> sub_6FEC      (returns 1 = detected, 0 = clean)
+//
+// sub_6FEC keys off two writable globals in anogs' __common section:
+//
+//     byte_2ADD90  (0x2ADD90)   "evaluated" flag
+//     qword_2ADD98 (0x2ADD98)   cached reason pointer (0 => clean)
+//
+// Logic: if byte_2ADD90 == 0 it runs the detectors (sub_7230 / sub_785C / the
+// XOR'd path list) and returns the verdict; otherwise it returns
+//     qword_2ADD98 != 0 ? 1 (detected) : 0 (clean).
+//
+// So pre-seeding (evaluated=1, reason=0) BEFORE the ACE's first evaluation makes
+// every caller -- the 15+ lazy sites via sub_EDA04, plus sub_69ED8 -- observe
+// "clean" forever. The detectors never run, and sub_8FD1C (report) and
+// sub_716C (root_alert) are never reached. Nothing but __common/__bss data is
+// written, so this is compatible with the arm64e W^X constraint.
+
+#define ACE_OFF_MEMO_DONE    0x2ADD90u   // byte_2ADD90
+#define ACE_OFF_MEMO_REASON  0x2ADD98u   // qword_2ADD98
+#define ACE_OFF_ROOT_ALERT   0x2AFAF8u   // byte_2AFAF8 ("root_alert" already sent)
+
+static uintptr_t g_anogs_base = 0;
+
+static uintptr_t anogs_find_base(void) {
+    uint32_t c = _dyld_image_count();
+    for (uint32_t i = 0; i < c; ++i) {
+        const char *n = _dyld_get_image_name(i);
+        if (n && strstr(n, "anogs.framework"))
+            return (uintptr_t)_dyld_get_image_header(i);
+    }
+    return 0;
+}
+
+static void anogs_memo_kill(void) {
+    if (!g_anogs_base) return;
+    volatile uint64_t *reason = (volatile uint64_t *)(g_anogs_base + ACE_OFF_MEMO_REASON);
+    volatile uint8_t  *done   = (volatile uint8_t  *)(g_anogs_base + ACE_OFF_MEMO_DONE);
+    volatile uint8_t  *alert  = (volatile uint8_t  *)(g_anogs_base + ACE_OFF_ROOT_ALERT);
+    *reason = 0;   // no cached detection reason
+    *alert  = 1;   // "alert already sent" (suppress root_alert)
+    *done   = 1;   // evaluated => sub_6FEC short-circuits to clean
+}
+
+static void *anogs_reassert_thread(void *arg) {
+    (void)arg;
+    // anogs is a framework dependency of the main binary, so its initialisers
+    // may run before ours; a short bounded re-assert closes that race window.
+    // By ~30 s AnoSDKInitEx has long since memoised "clean".
+    for (int i = 0; i < 120; ++i) {
+        anogs_memo_kill();
+        struct timespec ts = { 0, 250 * 1000 * 1000 };   // 250 ms
+        nanosleep(&ts, NULL);
+    }
+    return NULL;
+}
+
+static void styx_anogs_neutralize(void) {
+    g_anogs_base = anogs_find_base();
+    if (!g_anogs_base) {
+        probe_printf("[anogs      ] image not found (memo-kill skipped)");
+        return;
+    }
+    anogs_memo_kill();
+    probe_printf("[anogs      ] base=%p memo-kill: done@%p=1 reason@%p=0 alert@%p=1",
+                 (void *)g_anogs_base,
+                 (void *)(g_anogs_base + ACE_OFF_MEMO_DONE),
+                 (void *)(g_anogs_base + ACE_OFF_MEMO_REASON),
+                 (void *)(g_anogs_base + ACE_OFF_ROOT_ALERT));
+
+    pthread_t t;
+    if (pthread_create(&t, NULL, anogs_reassert_thread, NULL) == 0)
+        pthread_detach(t);
+    else
+        probe_printf("[anogs      ] re-assert thread failed to start");
+}
+
 // --- code-sign / entitlement integrity spoofs ------------------------------
 
 static int shim_SecCodeCheckValidity(void *code, uint32_t flags, void *req) {
@@ -604,6 +690,11 @@ void styx_stealth_start(void) {
     // __LINKEDIT before any of the anti-cheat's own code runs.
     styx_patch_cryptid();
     styx_cache_linkedit();
+
+    // Neutralise the anogs ACE jailbreak/env detector suite via its eval memo
+    // (data-only write to anogs' __common). Done before arming so it lands
+    // ahead of the ACE's own lazy evaluation.
+    styx_anogs_neutralize();
 
     // Global rebind (installs the shims in every image + an add-image callback
     // for late loads). Our shims only act once g_armed is set below.
