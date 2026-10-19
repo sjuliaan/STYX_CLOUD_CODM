@@ -27,11 +27,19 @@
 //
 // Hook surface is trimmed to the rival's exact set (no task_info / file-op hooks).
 //
-// fishhook compares `&symbol_name[1]` (i.e. the name with the binary's leading
-// underscore stripped) to the rebind name, so names here must NOT start with '_'.
+// Two rebinding passes are used:
+//   1. styx_rebind_got_scan()  -- chained-fixup-safe. Walks each non-system
+//      image's __got/__la_symbol_ptr slots and identifies the *resolved*
+//      pointer with dladdr(). This is what catches anogs (LC_DYLD_CHAINED_FIXUPS),
+//      which classic fishhook cannot see.
+//   2. rebind_symbols()        -- stock fishhook, for old-style images + the
+//      add-image callback.
+// fishhook compares `&symbol_name[1]` (leading underscore stripped), so the
+// names below must NOT start with '_'; the got-scan accepts either spelling.
 //
 // NOTE: `[rebind] originals resolved: N / M` in GPMGameCore.probe confirms
-// which symbols actually resolved.
+// which symbols actually resolved; `got-scan ... patched N slot(s)` shows the
+// chained-fixup pass.
 
 #include "stealth.h"
 
@@ -60,6 +68,7 @@
 #import <objc/runtime.h>
 
 #include "fishhook.h"
+#include "gotrebind.h"
 
 // ---------------------------------------------------------------------------
 // Probe log (raw fd + write(); never goes through a rebindable symbol).
@@ -143,6 +152,7 @@ static inline uint32_t styx_dyld_remap(uint32_t idx) {
 }
 
 static uint32_t shim_dyld_image_count(void) {
+    if (!orig_dyld_image_count) return 0;
     if (!g_armed || tls_hook) return orig_dyld_image_count();
     tls_hook = 1;
     uint32_t c = orig_dyld_image_count();
@@ -153,6 +163,7 @@ static uint32_t shim_dyld_image_count(void) {
 }
 
 static const char *shim_dyld_get_image_name(uint32_t idx) {
+    if (!orig_dyld_get_image_name) return NULL;
     if (!g_armed || tls_hook) return orig_dyld_get_image_name(idx);
     tls_hook = 1;
     uint32_t ridx = styx_dyld_remap(idx);
@@ -164,6 +175,7 @@ static const char *shim_dyld_get_image_name(uint32_t idx) {
 }
 
 static const struct mach_header *shim_dyld_get_image_header(uint32_t idx) {
+    if (!orig_dyld_get_image_header) return NULL;
     if (!g_armed || tls_hook) return orig_dyld_get_image_header(idx);
     tls_hook = 1;
     uint32_t ridx = styx_dyld_remap(idx);
@@ -175,6 +187,7 @@ static const struct mach_header *shim_dyld_get_image_header(uint32_t idx) {
 }
 
 static intptr_t shim_dyld_get_image_vmaddr_slide(uint32_t idx) {
+    if (!orig_dyld_get_image_vmaddr_slide) return 0;
     if (!g_armed || tls_hook) return orig_dyld_get_image_vmaddr_slide(idx);
     tls_hook = 1;
     intptr_t s = orig_dyld_get_image_vmaddr_slide(styx_dyld_remap(idx));
@@ -567,13 +580,23 @@ static ssize_t shim_recv(int s, void *buf, size_t len, int flags) {
 
 // ---------------------------------------------------------------------------
 // Rebinding (trimmed to the rival's exact symbol set).
+//
+// Names must equal what fishhook compares, i.e. `&symbol_name[1]`.  Almost all
+// game imports are `_foo` -> "foo", but the dyld family is imported as
+// "__dyld_*" (the Mach-O spelling of a C "_dyld_*" import), so its entries keep
+// that second underscore.  The ptrace/getseg*/Sec*/csops* rows are inert here
+// (no embedded image imports them) but are kept for parity with the rival.
 // ---------------------------------------------------------------------------
 
 static struct rebinding g_rebinds[] = {
-    { "dyld_image_count",            (void *)shim_dyld_image_count,           (void **)&orig_dyld_image_count },
-    { "dyld_get_image_name",         (void *)shim_dyld_get_image_name,        (void **)&orig_dyld_get_image_name },
-    { "dyld_get_image_header",       (void *)shim_dyld_get_image_header,      (void **)&orig_dyld_get_image_header },
-    { "dyld_get_image_vmaddr_slide", (void *)shim_dyld_get_image_vmaddr_slide, (void **)&orig_dyld_get_image_vmaddr_slide },
+    // The game imports these as "__dyld_image_count" (the Mach-O symbol for a
+    // C "_dyld_image_count" import), so fishhook's `&symbol_name[1]` yields
+    // "_dyld_image_count" -- the name must keep this second underscore (this is
+    // exactly why the rival's table spells them this way).
+    { "_dyld_image_count",            (void *)shim_dyld_image_count,           (void **)&orig_dyld_image_count },
+    { "_dyld_get_image_name",         (void *)shim_dyld_get_image_name,        (void **)&orig_dyld_get_image_name },
+    { "_dyld_get_image_header",       (void *)shim_dyld_get_image_header,      (void **)&orig_dyld_get_image_header },
+    { "_dyld_get_image_vmaddr_slide", (void *)shim_dyld_get_image_vmaddr_slide, (void **)&orig_dyld_get_image_vmaddr_slide },
     { "dladdr",                       (void *)shim_dladdr,                      (void **)&orig_dladdr },
     { "sysctl",                       (void *)shim_sysctl,                     (void **)&orig_sysctl },
     { "sysctlbyname",                 (void *)shim_sysctlbyname,               (void **)&orig_sysctlbyname },
@@ -650,8 +673,18 @@ static void swizzle_nsbundle(void) {
 // ---------------------------------------------------------------------------
 
 static void rebind_all(void) {
+    // 1) Classic fishhook pass first. It must run BEFORE the slot scan: on an
+    //    old-style image fishhook rewrites the same slots and would otherwise
+    //    save *our shim* into `replaced`, turning every orig_* call into
+    //    infinite recursion. The scan below skips slots already set to a shim.
     int rc = rebind_symbols(g_rebinds, N_REBINDS);
     probe_printf("[rebind     ] rebind_symbols (global, all images) rc=%d", rc);
+
+    // 2) Chained-fixup-safe pass. Chained images (codm, APM, ...) have no
+    //    indirect symbol table, so fishhook silently misses them. This pass
+    //    recovers each resolved __got slot's name with dladdr() and patches it.
+    int got = styx_rebind_got_scan(g_rebinds, N_REBINDS);
+    probe_printf("[rebind     ] got-scan (chained-fixup) patched %d slot(s)", got);
 
     int resolved = 0;
     for (size_t i = 0; i < N_REBINDS; ++i)
@@ -662,6 +695,31 @@ static void rebind_all(void) {
     for (size_t i = 0; i < N_REBINDS; ++i)
         if (!(g_rebinds[i].replaced && *g_rebinds[i].replaced))
             probe_printf("[rebind     ]   MISS %s", g_rebinds[i].name);
+}
+
+// Bounded late re-scans: lazily-bound slots (__la_symbol_ptr) only become
+// identifiable after their first call, and late-loaded images appear after
+// _dyld_register_func_for_add_image. A handful of passes closes both gaps.
+static void *styx_got_late_thread(void *arg) {
+    (void)arg;
+    static const int delays[] = { 1, 2, 4, 8, 16 };
+    int prev = 0;
+    for (size_t i = 0; i < sizeof(delays) / sizeof(delays[0]); ++i) {
+        struct timespec ts = { delays[i] - prev, 0 };
+        prev = delays[i];
+        nanosleep(&ts, NULL);
+        int n = styx_rebind_got_scan(g_rebinds, N_REBINDS);
+        if (n > 0) probe_printf("[rebind     ] late got-scan +%d slot(s)", n);
+    }
+    return NULL;
+}
+
+static void styx_start_late_got_scan(void) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, styx_got_late_thread, NULL) == 0)
+        pthread_detach(t);
+    else
+        probe_printf("[rebind     ] late got-scan thread failed to start");
 }
 
 void styx_stealth_start(void) {
@@ -706,4 +764,7 @@ void styx_stealth_start(void) {
     g_armed = 1;
     probe_printf("[init       ] bypass armed. Filtering detection calls...");
     probe_printf("======================================================");
+
+    // Catch lazy-bound slots and late images after the fact.
+    styx_start_late_got_scan();
 }
